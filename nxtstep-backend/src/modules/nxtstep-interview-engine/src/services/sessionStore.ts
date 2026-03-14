@@ -1,23 +1,19 @@
-// ============================================================
-// NxtStep Interview Engine — Session Store
-// In-memory store with MongoDB persistence interface.
-// In production, swap the in-memory map for Mongoose model calls.
-// ============================================================
+// nxtstep-backend/src/modules/nxtstep-interview-engine/src/services/sessionStore.ts
 
+import mongoose from 'mongoose';
+import { InterviewSession } from '../../../../models/InterviewSession';
 import {
   DifficultyLevel,
-  InterviewSession,
+  InterviewSession as EngineSession,
   SessionConfig,
   SessionContext,
 } from '../types/interview.types';
 
-// ─── Default session config ───────────────────────────────────
-
 const DEFAULT_CONFIG: SessionConfig = {
-  maxQuestions:              Number(process.env.MAX_QUESTIONS)                ?? 8,
-  maxFollowUpsPerQuestion:   Number(process.env.MAX_FOLLOWUPS_PER_QUESTION)   ?? 2,
-  confidenceThreshold:       Number(process.env.CONFIDENCE_FOLLOWUP_THRESHOLD) ?? 5,
-  conceptDepthThreshold:     Number(process.env.CONCEPT_DEPTH_FOLLOWUP_THRESHOLD) ?? 5,
+  maxQuestions:            Number(process.env.MAX_QUESTIONS)                     ?? 8,
+  maxFollowUpsPerQuestion: Number(process.env.MAX_FOLLOWUPS_PER_QUESTION)        ?? 2,
+  confidenceThreshold:     Number(process.env.CONFIDENCE_FOLLOWUP_THRESHOLD)     ?? 5,
+  conceptDepthThreshold:   Number(process.env.CONCEPT_DEPTH_FOLLOWUP_THRESHOLD)  ?? 5,
   questionWeights: {
     problem:    1.5,
     concept:    1.0,
@@ -25,18 +21,13 @@ const DEFAULT_CONFIG: SessionConfig = {
   },
 };
 
-// ─── In-memory map (dev / test) ───────────────────────────────
-
-const store = new Map<string, InterviewSession>();
-
-// ─── Store interface ──────────────────────────────────────────
+// ─── In-memory cache (reduces DB reads during active session) ─────────────────
+const cache = new Map<string, EngineSession>();
 
 export const sessionStore = {
-  /**
-   * Creates and persists a new session.
-   */
-  async create(context: SessionContext, config?: Partial<SessionConfig>): Promise<InterviewSession> {
-    const session: InterviewSession = {
+
+  async create(context: SessionContext, config?: Partial<SessionConfig>): Promise<EngineSession> {
+    const session: EngineSession = {
       sessionId:            context.sessionId,
       state:                'INIT',
       context,
@@ -48,42 +39,75 @@ export const sessionStore = {
       startedAt:            new Date(),
     };
 
-    store.set(context.sessionId, session);
-    console.log(`[SessionStore] Created session ${context.sessionId}`);
+    // Persist to MongoDB — store engine session data in the existing
+    // InterviewSession document under a new `engineState` field,
+    // OR store the full JSON in a dedicated field. Here we upsert:
+    await InterviewSession.findByIdAndUpdate(
+      new mongoose.Types.ObjectId(context.sessionId),
+      {
+        $set: {
+          'engineState': JSON.stringify(session),
+        },
+      },
+      { upsert: false } // Session must already exist (created by main interviewService)
+    );
+
+    cache.set(context.sessionId, session);
+    console.log(`[SessionStore] Created engine state for session ${context.sessionId}`);
     return session;
   },
 
-  /**
-   * Retrieves a session by ID.
-   */
-  async get(sessionId: string): Promise<InterviewSession | null> {
-    return store.get(sessionId) ?? null;
+  async get(sessionId: string): Promise<EngineSession | null> {
+    // Check cache first
+    if (cache.has(sessionId)) return cache.get(sessionId)!;
+
+    // Fall back to MongoDB
+    const doc = await InterviewSession.findById(
+      new mongoose.Types.ObjectId(sessionId)
+    ).lean();
+
+    if (!doc || !(doc as any).engineState) return null;
+
+    try {
+      const session = JSON.parse((doc as any).engineState) as EngineSession;
+      // Re-hydrate Date fields (JSON.parse loses Date type)
+      session.startedAt  = new Date(session.startedAt);
+      if (session.completedAt) session.completedAt = new Date(session.completedAt);
+      session.evaluations.forEach(e => {
+        e.evaluatedAt = new Date(e.evaluatedAt);
+      });
+      cache.set(sessionId, session);
+      return session;
+    } catch {
+      console.error(`[SessionStore] Failed to parse engineState for ${sessionId}`);
+      return null;
+    }
   },
 
-  /**
-   * Persists session state (overwrites existing entry).
-   */
-  async save(session: InterviewSession): Promise<void> {
-    store.set(session.sessionId, { ...session });
+  async save(session: EngineSession): Promise<void> {
+    // Update cache
+    cache.set(session.sessionId, { ...session });
+
+    // Persist to MongoDB
+    await InterviewSession.findByIdAndUpdate(
+      new mongoose.Types.ObjectId(session.sessionId),
+      { $set: { engineState: JSON.stringify(session) } }
+    );
   },
 
-  /**
-   * Deletes a session (e.g., after completion or timeout).
-   */
   async delete(sessionId: string): Promise<void> {
-    store.delete(sessionId);
-    console.log(`[SessionStore] Deleted session ${sessionId}`);
+    cache.delete(sessionId);
+    await InterviewSession.findByIdAndUpdate(
+      new mongoose.Types.ObjectId(sessionId),
+      { $unset: { engineState: '' } }
+    );
+    console.log(`[SessionStore] Deleted engine state for session ${sessionId}`);
   },
 
-  /**
-   * Returns all active session IDs (for monitoring).
-   */
   activeSessionIds(): string[] {
-    return Array.from(store.keys());
+    return Array.from(cache.keys());
   },
 };
-
-// ─── Session factory helper ───────────────────────────────────
 
 export function buildSessionContext(params: {
   sessionId:    string;

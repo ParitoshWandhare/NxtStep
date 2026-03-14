@@ -137,7 +137,7 @@ export interface GenerateQuestionJob {
   role: string;
   level: DifficultyLevel;
   topic: string;
-  previousQuestionIds: string[];
+  previousQuestions: string[];
 }
 
 export interface GenerateFollowUpJob {

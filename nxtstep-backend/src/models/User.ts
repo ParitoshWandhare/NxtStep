@@ -19,29 +19,25 @@ export interface IUser extends Document {
 
 const userSchema = new Schema<IUser>(
   {
-    name: { type: String, required: true, trim: true },
-    email: {
-      type: String,
-      required: true,
-      unique: true,
-      lowercase: true,
-      trim: true,
-      index: true,
-    },
+    name:  { type: String, required: true, trim: true },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
+
+    // Renamed to clearly indicate this field only ever stores a bcrypt hash
     passwordHash: { type: String, required: true },
-    rolePreferences: { type: [String], default: [] },
-    resumeUrl: { type: String },
-    resumeText: { type: String },
-    interests: { type: [String], default: [] },
-    passwordResetToken: { type: String },
+
+    rolePreferences:      { type: [String], default: [] },
+    resumeUrl:            { type: String },
+    resumeText:           { type: String },
+    interests:            { type: [String], default: [] },
+    passwordResetToken:   { type: String },
     passwordResetExpires: { type: Date },
   },
   { timestamps: true }
 );
 
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('passwordHash')) return next();
-  // passwordHash field stores plain text before save — we hash here
+  if (!this.isModified('passwordHash')) return next(); // passwordHash field stores plain text before save — we hash here
+  if (this.passwordHash?.startsWith('$2')) return next();
   this.passwordHash = await bcrypt.hash(this.passwordHash as string, 12);
   next();
 });

@@ -227,7 +227,7 @@ async function advanceSession(
       sessionId:          session.context.sessionId,
       role:               session.context.role,
       level:              session.context.level,
-      previousQuestions:  session.questions.map(q => q.id),
+      previousQuestions:  session.questions.map(q => q.topic),
     });
   } else {
     // All questions done — compute scorecard

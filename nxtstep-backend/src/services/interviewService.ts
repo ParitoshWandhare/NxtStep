@@ -53,16 +53,17 @@ export const startInterview = async (params: {
   await session.save();
 
   // Enqueue first question generation
-  const topics = getRoleTopics(params.role);
-  const firstTopic = topics[0];
+  // AFTER:
+const topics     = getRoleTopics(params.role);
+const firstTopic = topics[Math.floor(Math.random() * topics.length)]; // randomize start topic
 
-  const job: GenerateQuestionJob = {
-    sessionId: session._id.toString(),
-    role: params.role,
-    level: params.difficulty,
-    topic: firstTopic,
-    previousQuestions: [],
-  };
+const job: GenerateQuestionJob = {
+  sessionId:         session._id.toString(),
+  role:              params.role,
+  level:             params.difficulty,
+  topic:             firstTopic,
+  previousQuestions: [],
+};
 
   await generateQuestionQueue.add('generate-first-question', job, { priority: 1 });
   logger.info(`Interview started: session=${session._id} user=${params.userId} role=${params.role}`);
@@ -212,7 +213,7 @@ export const triggerNextQuestion = async (
   const topics = getRoleTopics(session.role);
   const nextTopicIndex = totalMainQuestions % topics.length;
   const topic = topics[nextTopicIndex];
-  const previousQuestions = session.questions.map((q) => q.text);
+  const previousQuestions = session.questions.map((q) => q.topic);
 
   session.currentQuestionIndex += 1;
   await session.save();

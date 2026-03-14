@@ -88,6 +88,7 @@ const interviewSessionSchema = new Schema<IInterviewSession>(
     difficulty: { type: String, enum: ['junior', 'mid', 'senior'], default: 'mid' },
     questions: { type: [questionSchema], default: [] },
     answers: { type: [answerSchema], default: [] },
+    engineState: { type: String }, // JSON string of EngineSession for persistence
     proctoring: {
       tabSwitchCount: { type: Number, default: 0 },
       cameraEvents: { type: [cameraEventSchema], default: [] },

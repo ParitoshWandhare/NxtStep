@@ -27,14 +27,13 @@ export const signup = async (input: SignupInput): Promise<AuthResult> => {
   }
 
   const user = await User.create({
-    name: input.name,
+    name:  input.name,
     email: input.email.toLowerCase(),
-    passwordHash: input.password, // pre-save hook will hash this
+    // Pre-save hook will bcrypt-hash this plain text value before writing to DB
+    passwordHash: input.password,
   });
 
   const token = signToken({ userId: user._id.toString(), email: user.email });
-  logger.info(`New user registered: ${user.email}`);
-
   return { user: user.toJSON(), token };
 };
 
@@ -75,20 +74,16 @@ export const resetPassword = async (token: string, newPassword: string): Promise
   const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
   const user = await User.findOne({
-    passwordResetToken: hashedToken,
+    passwordResetToken:   hashedToken,
     passwordResetExpires: { $gt: new Date() },
   });
+  if (!user) throw Object.assign(new Error('Invalid or expired reset token'), { statusCode: 400 });
 
-  if (!user) {
-    throw Object.assign(new Error('Invalid or expired reset token'), { statusCode: 400 });
-  }
-
-  user.passwordHash = newPassword; // pre-save hook will hash
-  user.passwordResetToken = undefined;
+  // Pre-save hook will bcrypt-hash this plain text value before writing to DB
+  user.passwordHash        = newPassword;
+  user.passwordResetToken  = undefined;
   user.passwordResetExpires = undefined;
   await user.save();
-
-  logger.info(`Password reset successful for: ${user.email}`);
 };
 
 export const getProfile = async (userId: string): Promise<Partial<IUser>> => {
