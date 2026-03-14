@@ -1,8 +1,10 @@
 import crypto from 'crypto';
 import { User, IUser } from '../models/User';
 import { signToken } from '../utils/jwt';
-import { sendPasswordResetEmail } from '../utils/email';
+import { sendPasswordResetEmail, sendWelcomeEmail } from '../utils/email';
 import { logger } from '../utils/logger';
+import { env } from '../config/env';
+import { createError } from '../middleware/errorHandler';
 
 export interface SignupInput {
   name: string;
@@ -16,88 +18,153 @@ export interface LoginInput {
 }
 
 export interface AuthResult {
-  user: Partial<IUser>;
+  user: Omit<IUser, 'passwordHash' | 'passwordResetToken' | 'passwordResetExpires'>;
   token: string;
 }
 
+// ── Signup ─────────────────────────────────────────────────────
+
 export const signup = async (input: SignupInput): Promise<AuthResult> => {
-  const existing = await User.findOne({ email: input.email.toLowerCase() });
+  const normalizedEmail = input.email.toLowerCase().trim();
+
+  const existing = await User.findOne({ email: normalizedEmail });
   if (existing) {
-    throw Object.assign(new Error('Email already registered'), { statusCode: 409 });
+    throw createError('Email already registered', 409);
   }
 
   const user = await User.create({
-    name:  input.name,
-    email: input.email.toLowerCase(),
-    // Pre-save hook will bcrypt-hash this plain text value before writing to DB
-    passwordHash: input.password,
+    name: input.name.trim(),
+    email: normalizedEmail,
+    passwordHash: input.password, // Pre-save hook hashes this
   });
 
   const token = signToken({ userId: user._id.toString(), email: user.email });
+
+  logger.info({ userId: user._id, email: user.email }, 'User registered');
+
+  // Fire-and-forget welcome email
+  sendWelcomeEmail(user.email, user.name).catch((err) =>
+    logger.warn({ err }, 'Failed to send welcome email'),
+  );
+
   return { user: user.toJSON(), token };
 };
 
-export const login = async (input: LoginInput): Promise<AuthResult> => {
-  const user = await User.findOne({ email: input.email.toLowerCase() });
-  if (!user) {
-    throw Object.assign(new Error('Invalid credentials'), { statusCode: 401 });
-  }
+// ── Login ──────────────────────────────────────────────────────
 
-  const isMatch = await user.comparePassword(input.password);
-  if (!isMatch) {
-    throw Object.assign(new Error('Invalid credentials'), { statusCode: 401 });
+export const login = async (input: LoginInput): Promise<AuthResult> => {
+  const normalizedEmail = input.email.toLowerCase().trim();
+
+  // MUST use +passwordHash to override the select:false on the field
+  const user = await User.findOne({ email: normalizedEmail }).select('+passwordHash');
+
+  // Use constant-time comparison logic (always compare even if user not found)
+  const dummyHash = '$2a$12$invalidhashfortimingprotection000000000000000';
+  const isMatch = user
+    ? await user.comparePassword(input.password)
+    : await import('bcryptjs').then((b) => b.compare(input.password, dummyHash));
+
+  if (!user || !isMatch) {
+    throw createError('Invalid email or password', 401);
   }
 
   const token = signToken({ userId: user._id.toString(), email: user.email });
-  logger.info(`User logged in: ${user.email}`);
+
+  // Update last login (non-blocking)
+  User.findByIdAndUpdate(user._id, {
+    lastLoginAt: new Date(),
+    $inc: { loginCount: 1 },
+  }).catch((err) => logger.warn({ err }, 'Failed to update last login'));
+
+  logger.info({ userId: user._id }, 'User logged in');
 
   return { user: user.toJSON(), token };
 };
 
-export const forgotPassword = async (email: string): Promise<void> => {
-  const user = await User.findOne({ email: email.toLowerCase() });
-  // Always return success to avoid email enumeration
-  if (!user) return;
+// ── Forgot password ────────────────────────────────────────────
 
+export const forgotPassword = async (email: string): Promise<void> => {
+  const normalizedEmail = email.toLowerCase().trim();
+  const user = await User.findOne({ email: normalizedEmail });
+
+  // Always return success to prevent email enumeration attacks
+  if (!user) {
+    logger.debug({ email: normalizedEmail }, 'Password reset requested for unknown email');
+    return;
+  }
+
+  // Generate a cryptographically secure reset token
   const resetToken = crypto.randomBytes(32).toString('hex');
   const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
 
-  user.passwordResetToken = hashedToken;
-  user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-  await user.save({ validateBeforeSave: false });
+  await User.findByIdAndUpdate(user._id, {
+    passwordResetToken: hashedToken,
+    passwordResetExpires: new Date(
+      Date.now() + env.PASSWORD_RESET_EXPIRES_HOURS * 60 * 60 * 1000,
+    ),
+  });
 
-  await sendPasswordResetEmail(user.email, resetToken);
-  logger.info(`Password reset email sent to: ${user.email}`);
+  const sent = await sendPasswordResetEmail(user.email, resetToken);
+  if (sent) {
+    logger.info({ userId: user._id }, 'Password reset email sent');
+  } else {
+    logger.warn({ userId: user._id }, 'Password reset email failed to send');
+  }
 };
 
-export const resetPassword = async (token: string, newPassword: string): Promise<void> => {
+// ── Reset password ─────────────────────────────────────────────
+
+export const resetPassword = async (
+  token: string,
+  newPassword: string,
+): Promise<void> => {
   const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
   const user = await User.findOne({
-    passwordResetToken:   hashedToken,
+    passwordResetToken: hashedToken,
     passwordResetExpires: { $gt: new Date() },
-  });
-  if (!user) throw Object.assign(new Error('Invalid or expired reset token'), { statusCode: 400 });
+  }).select('+passwordHash +passwordResetToken +passwordResetExpires');
 
-  // Pre-save hook will bcrypt-hash this plain text value before writing to DB
-  user.passwordHash        = newPassword;
-  user.passwordResetToken  = undefined;
+  if (!user) {
+    throw createError('Reset token is invalid or has expired', 400);
+  }
+
+  // Pre-save hook will hash this
+  user.passwordHash = newPassword;
+  user.passwordResetToken = undefined;
   user.passwordResetExpires = undefined;
   await user.save();
+
+  logger.info({ userId: user._id }, 'Password reset successfully');
 };
 
-export const getProfile = async (userId: string): Promise<Partial<IUser>> => {
-  const user = await User.findById(userId).select('-passwordHash -passwordResetToken -passwordResetExpires');
-  if (!user) throw Object.assign(new Error('User not found'), { statusCode: 404 });
-  return user.toJSON();
+// ── Get profile ────────────────────────────────────────────────
+
+export const getProfile = async (userId: string): Promise<IUser> => {
+  const user = await User.findById(userId);
+  if (!user) throw createError('User not found', 404);
+  return user;
 };
+
+// ── Update profile ─────────────────────────────────────────────
 
 export const updateProfile = async (
   userId: string,
-  updates: Partial<Pick<IUser, 'name' | 'rolePreferences' | 'interests' | 'resumeUrl' | 'resumeText'>>
-): Promise<Partial<IUser>> => {
-  const user = await User.findByIdAndUpdate(userId, updates, { new: true, runValidators: true })
-    .select('-passwordHash -passwordResetToken -passwordResetExpires');
-  if (!user) throw Object.assign(new Error('User not found'), { statusCode: 404 });
-  return user.toJSON();
+  updates: Partial<
+    Pick<IUser, 'name' | 'rolePreferences' | 'interests' | 'resumeUrl' | 'resumeText'>
+  >,
+): Promise<IUser> => {
+  // Sanitize name if provided
+  if (updates.name) updates.name = updates.name.trim();
+
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { $set: updates },
+    { new: true, runValidators: true },
+  );
+
+  if (!user) throw createError('User not found', 404);
+
+  logger.debug({ userId }, 'User profile updated');
+  return user;
 };

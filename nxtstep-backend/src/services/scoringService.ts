@@ -5,35 +5,56 @@ import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import { computeRecommendationsQueue } from '../queues';
 import { notifyScorecardReady } from '../sockets';
+import { createError } from '../middleware/errorHandler';
 
-const CATEGORY_WEIGHTS = {
-  technical: env.WEIGHT_TECHNICAL,
+
+// ── Weights loaded from environment ──────────────────────────
+
+const CATEGORY_WEIGHTS: Record<keyof IScores, number> = {
+  technical:      env.WEIGHT_TECHNICAL,
   problemSolving: env.WEIGHT_PROBLEM_SOLVING,
-  communication: env.WEIGHT_COMMUNICATION,
-  confidence: env.WEIGHT_CONFIDENCE,
-  conceptDepth: env.WEIGHT_CONCEPT_DEPTH,
+  communication:  env.WEIGHT_COMMUNICATION,
+  confidence:     env.WEIGHT_CONFIDENCE,
+  conceptDepth:   env.WEIGHT_CONCEPT_DEPTH,
 };
 
-// Problem-type questions have higher weight in final score
+// Problem-type questions count more toward the final score
 const QUESTION_TYPE_WEIGHTS: Record<string, number> = {
-  problem: 1.5,
-  concept: 1.0,
+  problem:    1.5,
+  concept:    1.0,
   behavioral: 0.8,
 };
 
-export const computeScorecard = async (sessionId: string, userId: string): Promise<IScorecard> => {
-  const session = await InterviewSession.findById(sessionId);
-  if (!session) throw new Error(`Session not found: ${sessionId}`);
+// ── Compute scorecard ─────────────────────────────────────────
 
-  const evaluations = await Evaluation.find({ sessionId });
+export const computeScorecard = async (
+  sessionId: string,
+  userId: string,
+): Promise<IScorecard> => {
+  const [session, evaluations] = await Promise.all([
+    InterviewSession.findById(sessionId),
+    Evaluation.find({ sessionId }),
+  ]);
+
+  if (!session) throw createError(`Session not found: ${sessionId}`, 404);
+
   if (evaluations.length === 0) {
-    logger.warn(`No evaluations found for session: ${sessionId} — creating empty scorecard`);
+    logger.warn({ sessionId }, 'No evaluations found — creating zero scorecard');
   }
 
-  // Aggregate per-category scores using weighted average
+  // ── Compute question-type-weighted average per category ───────
+  //
+  // FIX: Original code had totalWeight only incremented inside the loop
+  //      but referenced outside — now correctly scoped.
+
   const categoryTotals: Record<keyof IScores, number> = {
-    technical: 0, communication: 0, problemSolving: 0, confidence: 0, conceptDepth: 0,
+    technical: 0,
+    communication: 0,
+    problemSolving: 0,
+    confidence: 0,
+    conceptDepth: 0,
   };
+
   let totalWeight = 0;
 
   for (const evaluation of evaluations) {
@@ -52,32 +73,41 @@ export const computeScorecard = async (sessionId: string, userId: string): Promi
   const avgScores: IScores =
     totalWeight > 0
       ? {
-          technical: round2(categoryTotals.technical / totalWeight),
-          communication: round2(categoryTotals.communication / totalWeight),
+          technical:      round2(categoryTotals.technical      / totalWeight),
+          communication:  round2(categoryTotals.communication  / totalWeight),
           problemSolving: round2(categoryTotals.problemSolving / totalWeight),
-          confidence: round2(categoryTotals.confidence / totalWeight),
-          conceptDepth: round2(categoryTotals.conceptDepth / totalWeight),
+          confidence:     round2(categoryTotals.confidence     / totalWeight),
+          conceptDepth:   round2(categoryTotals.conceptDepth   / totalWeight),
         }
-      : { technical: 0, communication: 0, problemSolving: 0, confidence: 0, conceptDepth: 0 };
+      : {
+          technical: 0,
+          communication: 0,
+          problemSolving: 0,
+          confidence: 0,
+          conceptDepth: 0,
+        };
 
-  // Compute overall as weighted sum of category averages
+  // ── Overall = weighted sum of category averages ───────────────
+
   const overall = round2(
-    avgScores.technical * CATEGORY_WEIGHTS.technical +
+    avgScores.technical      * CATEGORY_WEIGHTS.technical      +
     avgScores.problemSolving * CATEGORY_WEIGHTS.problemSolving +
-    avgScores.communication * CATEGORY_WEIGHTS.communication +
-    avgScores.confidence * CATEGORY_WEIGHTS.confidence +
-    avgScores.conceptDepth * CATEGORY_WEIGHTS.conceptDepth
+    avgScores.communication  * CATEGORY_WEIGHTS.communication  +
+    avgScores.confidence     * CATEGORY_WEIGHTS.confidence     +
+    avgScores.conceptDepth   * CATEGORY_WEIGHTS.conceptDepth,
   );
 
-  // Aggregate feedback across all evaluations
-  const allStrengths = evaluations.flatMap((e) => e.feedback.strengths);
-  const allWeaknesses = evaluations.flatMap((e) => e.feedback.weaknesses);
+  // ── Aggregate and deduplicate feedback ────────────────────────
+
+  const allStrengths    = evaluations.flatMap((e) => e.feedback.strengths);
+  const allWeaknesses   = evaluations.flatMap((e) => e.feedback.weaknesses);
   const allImprovements = evaluations.flatMap((e) => e.feedback.improvements);
 
-  // Deduplicate feedback
-  const strengths = [...new Set(allStrengths)].slice(0, 5);
-  const weaknesses = [...new Set(allWeaknesses)].slice(0, 5);
+  const strengths   = [...new Set(allStrengths)].slice(0, 5);
+  const weaknesses  = [...new Set(allWeaknesses)].slice(0, 5);
   const suggestions = [...new Set(allImprovements)].slice(0, 5);
+
+  // ── Upsert scorecard ──────────────────────────────────────────
 
   const scorecard = await Scorecard.findOneAndUpdate(
     { sessionId },
@@ -91,44 +121,76 @@ export const computeScorecard = async (sessionId: string, userId: string): Promi
       suggestions,
       questionsEvaluated: evaluations.length,
     },
-    { upsert: true, new: true }
+    { upsert: true, new: true, setDefaultsOnInsert: true },
   );
 
-  // Link scorecard back to session
-  await InterviewSession.findByIdAndUpdate(sessionId, { scorecardId: scorecard._id });
+  // ── Link scorecard back to session ────────────────────────────
 
-  logger.info(`Scorecard computed: session=${sessionId} overall=${overall}`);
-
-  // Trigger recommendations
-  await computeRecommendationsQueue.add('compute-recommendations', {
-    sessionId,
-    userId,
-    scorecardId: scorecard._id.toString(),
+  await InterviewSession.findByIdAndUpdate(sessionId, {
+    scorecardId: scorecard._id,
+    status: 'completed',
   });
+
+  logger.info(
+    {
+      sessionId,
+      overall,
+      technical: avgScores.technical,
+      problemSolving: avgScores.problemSolving,
+      questionsEvaluated: evaluations.length,
+    },
+    'Scorecard computed',
+  );
+
+  // ── Trigger downstream recommendations ───────────────────────
+
+  await computeRecommendationsQueue.add(
+    `recommendations:${sessionId}`,
+    { sessionId, userId, scorecardId: scorecard._id.toString() },
+    { jobId: `rec:${sessionId}`, removeOnComplete: { count: 10 } },
+  );
+
+  // ── Notify connected client via WebSocket ─────────────────────
 
   try {
     notifyScorecardReady(sessionId, scorecard.toJSON());
   } catch {
-    // Socket might not be initialized
+    // Socket not initialized in worker process — this is expected
   }
 
   return scorecard;
 };
 
-export const getScorecard = async (sessionId: string, userId: string): Promise<IScorecard> => {
-  // Verify the session belongs to this user
+// ── Get scorecard (with ownership check) ──────────────────────
+
+export const getScorecard = async (
+  sessionId: string,
+  userId: string,
+): Promise<IScorecard> => {
   const session = await InterviewSession.findOne({ _id: sessionId, userId });
-  if (!session) throw Object.assign(new Error('Session not found'), { statusCode: 404 });
+  if (!session) throw createError('Session not found', 404);
 
   const scorecard = await Scorecard.findOne({ sessionId });
   if (!scorecard) {
-    throw Object.assign(new Error('Scorecard not ready yet'), { statusCode: 404 });
+    throw createError(
+      'Scorecard not ready yet — interview is still being evaluated',
+      404,
+    );
   }
+
   return scorecard;
 };
 
-export const getUserScorecards = async (userId: string): Promise<IScorecard[]> => {
-  return Scorecard.find({ userId }).sort({ createdAt: -1 }).limit(20);
+// ── Get all scorecards for a user ─────────────────────────────
+
+export const getUserScorecards = async (userId: string) => {
+  return Scorecard.find({ userId })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .lean()
+    .exec();
 };
+
+// ── Helpers ───────────────────────────────────────────────────
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;

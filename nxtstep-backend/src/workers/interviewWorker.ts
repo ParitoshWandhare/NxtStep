@@ -1,6 +1,6 @@
 import { Worker, Job } from 'bullmq';
 import { env } from '../config/env';
-import { logger } from '../utils/logger';
+import { logger, logWorkerJob } from '../utils/logger';
 import { aiAdapter } from '../ai/aiAdapter';
 import {
   buildQuestionGenerationPrompt,
@@ -16,6 +16,7 @@ import {
   notifyQuestionReady,
   notifyEvaluationReady,
   notifyFollowUpReady,
+  notifyWorkerError,
 } from '../sockets';
 import {
   EvaluateAnswerJob,
@@ -24,19 +25,20 @@ import {
   ComputeScorecardJob,
   ComputeRecommendationsJob,
   generateFollowUpQueue,
+  bullRedisConnection,
 } from '../queues';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 
-const connection = { url: env.REDIS_URL };
-
-// ─── Question Generation Worker ───────────────────────────────────────────────
+// ── Question Generation Worker ────────────────────────────────
 
 export const questionWorker = new Worker(
   'generate-question',
   async (job: Job<GenerateQuestionJob>) => {
     const { sessionId, role, level, topic, previousQuestions } = job.data;
-    logger.debug(`Generating question: session=${sessionId} topic=${topic}`);
+    const start = Date.now();
+
+    logWorkerJob('generate-question', job.id ?? '', 'started');
 
     const { system, user } = buildQuestionGenerationPrompt({
       role,
@@ -47,164 +49,196 @@ export const questionWorker = new Worker(
     });
 
     const question = await aiAdapter.sendJSON<{
-      id: string;
-      text: string;
-      type: 'concept' | 'problem' | 'behavioral';
+      id:               string;
+      text:             string;
+      type:             'concept' | 'problem' | 'behavioral';
       expectedKeywords: string[];
-      difficulty: string;
-    }>([
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ], { maxTokens: 400 });
+      difficulty:       string;
+    }>(
+      [
+        { role: 'system', content: system },
+        { role: 'user',   content: user },
+      ],
+      { maxTokens: 400, temperature: 0.7 },
+    );
 
-    // Ensure unique ID
-    question.id = `q_${uuidv4()}`;
-
+    // Ensure unique question ID
     const questionWithMeta = {
-      ...question,
+      id:               `q_${uuidv4()}`,
+      text:             question.text,
+      type:             question.type ?? 'concept',
       topic,
-      followUpCount: 0,
+      difficulty:       question.difficulty ?? level,
+      expectedKeywords: Array.isArray(question.expectedKeywords) ? question.expectedKeywords : [],
+      followUpCount:    0,
     };
 
     await addQuestionToSession(sessionId, questionWithMeta);
+    notifyQuestionReady(sessionId, questionWithMeta);
 
-    try {
-      notifyQuestionReady(sessionId, questionWithMeta);
-    } catch {
-      // Socket might not be initialized
-    }
-
-    logger.info(`Question generated: session=${sessionId} id=${question.id}`);
-    return { questionId: question.id };
+    logWorkerJob('generate-question', job.id ?? '', 'completed', Date.now() - start);
+    return { questionId: questionWithMeta.id };
   },
-  { connection, concurrency: 5 }
+  {
+    connection:  bullRedisConnection,
+    concurrency: env.WORKER_CONCURRENCY_GENERATE,
+  },
 );
 
-// ─── Answer Evaluation Worker ─────────────────────────────────────────────────
+// ── Answer Evaluation Worker ──────────────────────────────────
 
 export const evaluationWorker = new Worker(
   'evaluate-answer',
   async (job: Job<EvaluateAnswerJob>) => {
-    const { sessionId, questionId, answerText, questionText, expectedKeywords, role, level } = job.data;
-    logger.debug(`Evaluating answer: session=${sessionId} question=${questionId}`);
+    const { sessionId, questionId, answerText, questionText, expectedKeywords, role, level } =
+      job.data;
+    const start = Date.now();
+
+    logWorkerJob('evaluate-answer', job.id ?? '', 'started');
 
     const { system, user } = buildEvaluationPrompt({
-      question: questionText,
-      answer: answerText,
+      question:         questionText,
+      answer:           answerText,
       expectedKeywords,
       role,
       level,
     });
 
     const promptHash = crypto
-      .createHash('md5')
+      .createHash('sha256')
       .update(system + user)
-      .digest('hex');
+      .digest('hex')
+      .slice(0, 12);
 
     const result = await aiAdapter.sendJSON<{
-      scores: { technical: number; communication: number; problemSolving: number; confidence: number; conceptDepth: number };
-      detectedKeywords: string[];
-      missingKeywords: string[];
-      strengths: string[];
-      weaknesses: string[];
-      improvements: string[];
+      scores: {
+        technical:      number;
+        communication:  number;
+        problemSolving: number;
+        confidence:     number;
+        conceptDepth:   number;
+      };
+      detectedKeywords:  string[];
+      missingKeywords:   string[];
+      strengths:         string[];
+      weaknesses:        string[];
+      improvements:      string[];
       shouldAskFollowUp: boolean;
-      followUpReason: string;
-    }>([
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ], { maxTokens: 600 });
+      followUpReason:    string;
+    }>(
+      [
+        { role: 'system', content: system },
+        { role: 'user',   content: user },
+      ],
+      { maxTokens: 600, temperature: 0.2 },
+    );
 
-    // Normalize scores to 0–10
-    const normalizeScore = (n: unknown) => {
-      const num = typeof n === 'number' ? n : parseFloat(String(n) || '0');
-      return Math.max(0, Math.min(10, isNaN(num) ? 0 : num));
+    // Clamp all scores to [0, 10]
+    const clamp = (n: unknown): number => {
+      const num = typeof n === 'number' ? n : parseFloat(String(n ?? '0'));
+      return Math.max(0, Math.min(10, isNaN(num) ? 0 : Math.round(num * 10) / 10));
     };
 
-    const normalizedScores = {
-      technical: normalizeScore(result.scores?.technical),
-      communication: normalizeScore(result.scores?.communication),
-      problemSolving: normalizeScore(result.scores?.problemSolving),
-      confidence: normalizeScore(result.scores?.confidence),
-      conceptDepth: normalizeScore(result.scores?.conceptDepth),
+    const scores = {
+      technical:      clamp(result.scores?.technical),
+      communication:  clamp(result.scores?.communication),
+      problemSolving: clamp(result.scores?.problemSolving),
+      confidence:     clamp(result.scores?.confidence),
+      conceptDepth:   clamp(result.scores?.conceptDepth),
     };
 
-    // Rules-based boost: if expected keywords appear in answer, bump technical score slightly
-    const answerLower = answerText.toLowerCase();
-    const keywordsFound = expectedKeywords.filter((k) => answerLower.includes(k.toLowerCase()));
-    if (keywordsFound.length > 0) {
-      const boost = Math.min(keywordsFound.length * 0.3, 1.5);
-      normalizedScores.technical = Math.min(10, normalizedScores.technical + boost);
+    // Rules-based keyword boost: bump technical score for detected keywords AI missed
+    const answerLower   = answerText.toLowerCase();
+    const keywordsFound = (result.detectedKeywords ?? []).length > 0
+      ? result.detectedKeywords
+      : expectedKeywords.filter((k) => answerLower.includes(k.toLowerCase()));
+
+    const missedByAI = expectedKeywords.filter(
+      (k) => !result.detectedKeywords?.includes(k) && answerLower.includes(k.toLowerCase()),
+    );
+    if (missedByAI.length > 0) {
+      const boost = Math.min(missedByAI.length * 0.5, 2);
+      scores.technical = Math.min(10, scores.technical + boost);
+      logger.debug({ missedByAI, boost }, 'Applied keyword boost');
     }
+
+    const latencyMs = Date.now() - start;
 
     const evaluation = await Evaluation.create({
       sessionId,
       questionId,
       answerText,
-      scores: normalizedScores,
-      detectedKeywords: result.detectedKeywords || keywordsFound,
-      missingKeywords: result.missingKeywords || [],
+      scores,
+      detectedKeywords:    keywordsFound,
+      missingKeywords:     result.missingKeywords ?? [],
       feedback: {
-        strengths: result.strengths || [],
-        weaknesses: result.weaknesses || [],
-        improvements: result.improvements || [],
+        strengths:    result.strengths    ?? [],
+        weaknesses:   result.weaknesses   ?? [],
+        improvements: result.improvements ?? [],
       },
       followUp: {
         shouldAsk: result.shouldAskFollowUp ?? false,
-        reason: result.followUpReason || '',
+        reason:    result.followUpReason    ?? '',
       },
       promptHash,
-      modelUsed: env.OPENROUTER_DEFAULT_MODEL,
+      modelUsed:           env.OPENROUTER_DEFAULT_MODEL,
+      evaluationLatencyMs: latencyMs,
     });
 
-    // Link evaluation back to answer in session
+    // Link evaluation to session answer
     await InterviewSession.updateOne(
       { _id: sessionId, 'answers.questionId': questionId },
-      { $set: { 'answers.$.evaluationId': evaluation._id } }
+      { $set: { 'answers.$.evaluationId': evaluation._id } },
     );
 
-    try {
-      notifyEvaluationReady(sessionId, evaluation.toJSON());
-    } catch {
-      // Socket might not be initialized
-    }
+    notifyEvaluationReady(sessionId, evaluation.toJSON());
 
-    // Check if follow-up is needed
-    const shouldFollowUp =
+    // Decide on follow-up
+    const needsFollowUp =
       result.shouldAskFollowUp &&
-      (normalizedScores.confidence < env.CONFIDENCE_FOLLOWUP_THRESHOLD ||
-        normalizedScores.conceptDepth < env.CONCEPT_DEPTH_FOLLOWUP_THRESHOLD);
+      (scores.confidence  < env.CONFIDENCE_FOLLOWUP_THRESHOLD ||
+       scores.conceptDepth < env.CONCEPT_DEPTH_FOLLOWUP_THRESHOLD);
 
-    if (shouldFollowUp) {
-      const session = await InterviewSession.findById(sessionId);
+    if (needsFollowUp) {
+      const session = await InterviewSession.findById(sessionId).select('questions');
       const question = session?.questions.find((q) => q.id === questionId);
       const followUpCount = question?.followUpCount ?? 0;
 
       if (followUpCount < env.MAX_FOLLOWUPS_PER_QUESTION) {
-        await generateFollowUpQueue.add('generate-followup', {
-          sessionId,
-          questionId,
-          originalQuestion: questionText,
-          candidateAnswer: answerText,
-          missingKeywords: result.missingKeywords || [],
-          weaknesses: result.weaknesses || [],
-        } as GenerateFollowUpJob);
+        await generateFollowUpQueue.add(
+          `fu:${sessionId}:${questionId}`,
+          {
+            sessionId,
+            questionId,
+            originalQuestion: questionText,
+            candidateAnswer:  answerText,
+            missingKeywords:  result.missingKeywords ?? [],
+            weaknesses:       result.weaknesses      ?? [],
+          } as GenerateFollowUpJob,
+          { jobId: `fu:${sessionId}:${questionId}` },
+        );
       }
     }
 
-    logger.info(`Evaluation complete: session=${sessionId} question=${questionId} overall=${JSON.stringify(normalizedScores)}`);
+    logWorkerJob('evaluate-answer', job.id ?? '', 'completed', latencyMs);
     return { evaluationId: evaluation._id.toString() };
   },
-  { connection, concurrency: 5 }
+  {
+    connection:  bullRedisConnection,
+    concurrency: env.WORKER_CONCURRENCY_EVALUATE,
+  },
 );
 
-// ─── Follow-up Generation Worker ─────────────────────────────────────────────
+// ── Follow-up Generation Worker ───────────────────────────────
 
 export const followUpWorker = new Worker(
   'generate-followup',
   async (job: Job<GenerateFollowUpJob>) => {
-    const { sessionId, questionId, originalQuestion, candidateAnswer, missingKeywords, weaknesses } = job.data;
-    logger.debug(`Generating follow-up: session=${sessionId} parent=${questionId}`);
+    const { sessionId, questionId, originalQuestion, candidateAnswer, missingKeywords, weaknesses } =
+      job.data;
+    const start = Date.now();
+
+    logWorkerJob('generate-followup', job.id ?? '', 'started');
 
     const { system, user } = buildFollowUpPrompt({
       originalQuestion,
@@ -213,77 +247,107 @@ export const followUpWorker = new Worker(
       weaknesses,
     });
 
-    const result = await aiAdapter.sendJSON<{ text: string }>([
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ], { maxTokens: 200 });
+    const result = await aiAdapter.sendJSON<{ text: string }>(
+      [
+        { role: 'system', content: system },
+        { role: 'user',   content: user },
+      ],
+      { maxTokens: 200, temperature: 0.5 },
+    );
 
     const followUpQuestion = {
-      id: `q_fu_${uuidv4()}`,
-      text: result.text,
-      type: 'concept' as const,
-      topic: 'follow-up',
-      difficulty: 'mid',
+      id:               `q_fu_${uuidv4()}`,
+      text:             result.text,
+      type:             'concept' as const,
+      topic:            'follow-up',
+      difficulty:       'mid',
       expectedKeywords: missingKeywords,
-      followUpCount: 0,
+      followUpCount:    0,
       parentQuestionId: questionId,
     };
 
     await addQuestionToSession(sessionId, followUpQuestion);
 
-    // Increment parent question follow-up count
+    // Increment parent question follow-up counter
     await InterviewSession.updateOne(
       { _id: sessionId, 'questions.id': questionId },
-      { $inc: { 'questions.$.followUpCount': 1 } }
+      { $inc: { 'questions.$.followUpCount': 1 } },
     );
 
-    try {
-      notifyFollowUpReady(sessionId, followUpQuestion);
-    } catch {
-      // Socket might not be initialized
-    }
+    notifyFollowUpReady(sessionId, followUpQuestion);
 
-    logger.info(`Follow-up generated: session=${sessionId} parent=${questionId}`);
+    logWorkerJob('generate-followup', job.id ?? '', 'completed', Date.now() - start);
     return { followUpId: followUpQuestion.id };
   },
-  { connection, concurrency: 5 }
+  {
+    connection:  bullRedisConnection,
+    concurrency: env.WORKER_CONCURRENCY_GENERATE,
+  },
 );
 
-// ─── Scorecard Worker ─────────────────────────────────────────────────────────
+// ── Scorecard Worker ──────────────────────────────────────────
 
 export const scorecardWorker = new Worker(
   'compute-scorecard',
   async (job: Job<ComputeScorecardJob>) => {
     const { sessionId, userId } = job.data;
-    logger.debug(`Computing scorecard: session=${sessionId}`);
+    const start = Date.now();
+
+    logWorkerJob('compute-scorecard', job.id ?? '', 'started');
+
     const scorecard = await computeScorecard(sessionId, userId);
+
+    logWorkerJob('compute-scorecard', job.id ?? '', 'completed', Date.now() - start);
     return { scorecardId: scorecard._id.toString() };
   },
-  { connection, concurrency: 3 }
+  {
+    connection:  bullRedisConnection,
+    concurrency: env.WORKER_CONCURRENCY_SCORECARD,
+  },
 );
 
-// ─── Recommendations Worker ───────────────────────────────────────────────────
+// ── Recommendations Worker ────────────────────────────────────
 
 export const recommendationsWorker = new Worker(
   'compute-recommendations',
   async (job: Job<ComputeRecommendationsJob>) => {
     const { sessionId, userId } = job.data;
-    logger.debug(`Computing recommendations: session=${sessionId}`);
+    const start = Date.now();
+
+    logWorkerJob('compute-recommendations', job.id ?? '', 'started');
+
     await computeRecommendations(sessionId, userId);
+
+    logWorkerJob('compute-recommendations', job.id ?? '', 'completed', Date.now() - start);
     return { done: true };
   },
-  { connection, concurrency: 3 }
+  {
+    connection:  bullRedisConnection,
+    concurrency: env.WORKER_CONCURRENCY_RECOMMEND,
+  },
 );
 
-// ─── Error handlers ───────────────────────────────────────────────────────────
+// ── Shared error & completion handlers ───────────────────────
 
-[questionWorker, evaluationWorker, followUpWorker, scorecardWorker, recommendationsWorker].forEach(
-  (worker) => {
-    worker.on('failed', (job, err) => {
-      logger.error(`Worker job failed: queue=${worker.name} job=${job?.id} error=${err.message}`);
-    });
-    worker.on('error', (err) => {
-      logger.error(`Worker error: queue=${worker.name} error=${err.message}`);
-    });
-  }
-);
+const allWorkers = [
+  questionWorker,
+  evaluationWorker,
+  followUpWorker,
+  scorecardWorker,
+  recommendationsWorker,
+];
+
+for (const worker of allWorkers) {
+  worker.on('failed', (job, err) => {
+    const sid = (job?.data as { sessionId?: string })?.sessionId;
+    logWorkerJob(worker.name, job?.id ?? '', 'failed', undefined, err.message);
+
+    if (sid) {
+      notifyWorkerError(sid, `Processing failed: ${err.message}`);
+    }
+  });
+
+  worker.on('error', (err) => {
+    logger.error({ queue: worker.name, err: err.message }, 'Worker error');
+  });
+}
