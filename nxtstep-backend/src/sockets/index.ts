@@ -85,3 +85,7 @@ export const notifyRecommendationsReady = (sessionId: string, recommendations: u
 export const notifyInterviewTerminated = (sessionId: string, reason: string) => {
   getIO().to(`session:${sessionId}`).emit('interview:terminated', { reason });
 };
+
+export const notifyWorkerError = (sessionId: string, message: string) => {
+  getIO().to(`session:${sessionId}`).emit('worker:error', { message });
+};

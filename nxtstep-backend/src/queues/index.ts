@@ -1,6 +1,10 @@
 import { Queue } from 'bullmq';
 import { env } from '../config/env';
 
+export const bullRedisConnection = {
+  url: env.REDIS_URL,
+};
+
 const connection = {
   url: env.REDIS_URL,
 };
