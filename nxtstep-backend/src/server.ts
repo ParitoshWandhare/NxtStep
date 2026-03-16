@@ -6,7 +6,7 @@ import 'dotenv/config';
 import http from 'http';
 import { app } from './app';
 import { connectDB } from './config/database';
-import { redisClient } from './config/redis';
+import { connectRedis, disconnectRedis } from './config/redis';
 import { initSocket } from './sockets/index';
 import { closeAllQueues, addIngestNewsJob } from './queues';
 import { closeAllWorkers } from './workers/index';
@@ -20,12 +20,13 @@ const start = async () => {
   await connectDB();
 
   // 2. Connect to Redis (non-fatal — safe wrappers handle degraded state)
-  try {
-    await redisClient.connect();
-    logger.info('Redis connected');
-  } catch (err) {
-    logger.warn({ err }, 'Redis unavailable — running without cache');
-  }
+  // try {
+  //   await redisClient.connect();
+  //   logger.info('Redis connected');
+  // } catch (err) {
+  //   logger.warn({ err }, 'Redis unavailable — running without cache');
+  // }
+  await connectRedis();
 
   // 3. Create HTTP server
   httpServer = http.createServer(app);
@@ -64,7 +65,8 @@ const shutdown = async (signal: string) => {
     await Promise.allSettled([
       closeAllWorkers(),
       closeAllQueues(),
-      redisClient.quit(),
+      // redisClient.quit(),
+      disconnectRedis(),
     ]);
   } catch (err) {
     logger.warn({ err }, 'Error during graceful shutdown');

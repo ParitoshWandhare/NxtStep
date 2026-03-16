@@ -29,7 +29,7 @@ const newsArticleSchema = new Schema<INewsArticle>(
     publishedAt: { type: Date, required: true, index: true },
     category: { type: String, enum: ['tech', 'business', 'finance', 'ai', 'startups'], required: true, index: true },
     summary: { type: String, default: '' },
-    tags: { type: [String], default: [], index: true },
+    tags: { type: [String], default: [] },
     imageUrl: { type: String },
     globalClickCount: { type: Number, default: 0 },
   },
@@ -55,7 +55,7 @@ const newsEventSchema = new Schema<INewsEvent>({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   articleId: { type: Schema.Types.ObjectId, ref: 'NewsArticle', required: true, index: true },
   action: { type: String, enum: ['click', 'save', 'share', 'dismiss'], required: true },
-  timestamp: { type: Date, default: Date.now, index: true },
+  timestamp: { type: Date, default: Date.now, },
 });
 
 newsEventSchema.index({ userId: 1, timestamp: -1 });

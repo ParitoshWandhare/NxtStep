@@ -28,7 +28,7 @@ export interface IUser extends Document {
 const userSchema = new Schema<IUser>(
   {
     name: { type: String, required: [true, 'Name is required'], trim: true, minlength: 2, maxlength: 100 },
-    email: { type: String, required: [true, 'Email is required'], unique: true, lowercase: true, trim: true, match: [/^\S+@\S+\.\S+$/, 'Invalid email'] },
+    email: { type: String, required: [true, 'Email is required'], lowercase: true, trim: true, match: [/^\S+@\S+\.\S+$/, 'Invalid email'] },
     passwordHash: { type: String, required: true, select: false },
     rolePreferences: { type: [String], default: [] },
     resumeUrl: { type: String },
