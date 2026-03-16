@@ -1,112 +1,149 @@
 version: '3.9'
 
-# ── Shared environment ────────────────────────────────────────────
-x-api-env: &api-env
-  NODE_ENV:    ${NODE_ENV:-development}
-  PORT:        ${PORT:-5001}
-  MONGO_URI:   mongodb://mongo:27017/nxtstep
-  REDIS_URL:   redis://redis:6379
-  CLIENT_URL:  ${CLIENT_URL:-http://localhost:3000}
-  JWT_SECRET:  ${JWT_SECRET:?JWT_SECRET is required}
-  OPENROUTER_API_KEY:       ${OPENROUTER_API_KEY:-}
-  OPENROUTER_DEFAULT_MODEL: ${OPENROUTER_DEFAULT_MODEL:-openai/gpt-4o-mini}
-  DEEPGRAM_API_KEY:         ${DEEPGRAM_API_KEY:-}
-  ELEVENLABS_API_KEY:       ${ELEVENLABS_API_KEY:-}
-  GNEWS_API_KEY:            ${GNEWS_API_KEY:-}
-  NEWSAPI_KEY:              ${NEWSAPI_KEY:-}
-  SMTP_HOST:    ${SMTP_HOST:-mailhog}
-  SMTP_PORT:    ${SMTP_PORT:-1025}
-  SMTP_USER:    ${SMTP_USER:-}
-  SMTP_PASS:    ${SMTP_PASS:-}
-  SMTP_FROM:    ${SMTP_FROM:-noreply@nxtstep.local}
+# ============================================================
+# NxtStep — Docker Compose
+# Starts: app, mongodb, redis, mongo-express (dev UI)
+# Usage:
+#   Development : docker compose up
+#   Production  : docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# ============================================================
 
 services:
-  # ── MongoDB ─────────────────────────────────────────────────────
-  mongo:
-    image: mongo:7.0-jammy
+
+  # ── NxtStep API ────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: nxtstep-api
     restart: unless-stopped
+    ports:
+      - "${PORT:-5000}:5000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 5000
+      MONGODB_URI: mongodb://mongo:27017/nxtstep
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CLIENT_URL: ${CLIENT_URL:-http://localhost:5173}
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      AI_PROVIDER: ${AI_PROVIDER:-openrouter}
+      AI_MODEL: ${AI_MODEL:-openai/gpt-4o-mini}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-https://openrouter.ai/api/v1}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@nxtstep.io}
+      NEWS_API_KEY: ${NEWS_API_KEY:-}
+      GNEWS_API_KEY: ${GNEWS_API_KEY:-}
+      UPLOAD_DIR: /app/uploads
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
-      - mongo_data:/data/db
+      - ./src:/app/src          # Hot reload in dev
+      - uploads:/app/uploads
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nxtstep-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── MongoDB ────────────────────────────────────────────────
+  mongo:
+    image: mongo:7.0
+    container_name: nxtstep-mongo
+    restart: unless-stopped
     ports:
       - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: nxtstep
+    volumes:
+      - mongo-data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - nxtstep-net
     healthcheck:
-      test:     ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 })"]
-      interval: 15s
-      timeout:  5s
-      retries:  5
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # ── Redis ────────────────────────────────────────────────────────
+  # ── Redis ──────────────────────────────────────────────────
   redis:
     image: redis:7.2-alpine
+    container_name: nxtstep-redis
     restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning
-    volumes:
-      - redis_data:/data
     ports:
       - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1
+    volumes:
+      - redis-data:/data
+    networks:
+      - nxtstep-net
     healthcheck:
-      test:     ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
-      timeout:  3s
-      retries:  5
+      timeout: 3s
+      retries: 5
 
-  # ── API Server ───────────────────────────────────────────────────
-  api:
-    build:
-      context:    .
-      dockerfile: Dockerfile
-      target:     production
+  # ── Mongo Express (dev only) ───────────────────────────────
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: nxtstep-mongo-ui
     restart: unless-stopped
-    environment: *api-env
     ports:
-      - "${PORT:-5001}:5001"
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:-nxtstep-dev}
+      ME_CONFIG_MONGODB_ENABLE_ADMIN: "true"
     depends_on:
       mongo:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test:         ["CMD", "wget", "-qO-", "http://localhost:5001/health"]
-      interval:     30s
-      timeout:      10s
-      start_period: 20s
-      retries:      3
-    deploy:
-      resources:
-        limits:
-          memory: 512m
-          cpus: '0.5'
-
-  # ── Worker Process ────────────────────────────────────────────────
-  worker:
-    build:
-      context:    .
-      dockerfile: Dockerfile
-      target:     production
-    restart: unless-stopped
-    command: ["node", "dist/workers/index.js"]
-    environment: *api-env
-    depends_on:
-      mongo:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 768m
-          cpus: '1.0'
-
-  # ── MailHog (dev email) ───────────────────────────────────────────
-  mailhog:
-    image: mailhog/mailhog:latest
-    restart: unless-stopped
-    ports:
-      - "1025:1025"   # SMTP
-      - "8025:8025"   # Web UI
+    networks:
+      - nxtstep-net
     profiles:
-      - dev
+      - dev-tools
+
+  # ── BullMQ Dashboard (dev only) ───────────────────────────
+  bull-board:
+    image: node:20-alpine
+    container_name: nxtstep-bull-board
+    restart: unless-stopped
+    working_dir: /app
+    command: >
+      sh -c "npm install -g @bull-board/cli && bull-board --redis-host redis --redis-port 6379 --port 3001"
+    ports:
+      - "3001:3001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nxtstep-net
+    profiles:
+      - dev-tools
 
 volumes:
-  mongo_data:  { driver: local }
-  redis_data:  { driver: local }
+  mongo-data:
+    driver: local
+  redis-data:
+    driver: local
+  uploads:
+    driver: local
+
+networks:
+  nxtstep-net:
+    driver: bridge

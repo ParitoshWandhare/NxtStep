@@ -1,3 +1,8 @@
+// ============================================================
+// NxtStep — Logger
+// Pino-based structured logging with pretty-print in dev.
+// ============================================================
+
 import pino, { Logger } from 'pino';
 import { env } from '../config/env';
 
@@ -34,7 +39,6 @@ export const logger: Logger = pino(
         'req.headers.cookie',
         'body.password',
         'body.newPassword',
-        'body.currentPassword',
         '*.passwordHash',
         '*.passwordResetToken',
         '*.token',
@@ -44,17 +48,6 @@ export const logger: Logger = pino(
   },
   transport ? pino.transport(transport) : undefined,
 );
-
-// Structured logging helpers
-export const logRequest = (
-  method: string,
-  path: string,
-  statusCode: number,
-  durationMs: number,
-  userId?: string,
-) => {
-  logger.info({ method, path, statusCode, durationMs, userId }, 'HTTP request');
-};
 
 export const logAICall = (
   model: string,

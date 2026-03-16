@@ -1,22 +1,15 @@
+// ============================================================
+// NxtStep — API Response Helpers
+// ============================================================
+
 import { Response } from 'express';
 
 export interface ApiResponse<T = unknown> {
   success: boolean;
   message?: string;
   data?: T;
-  error?: string;
   meta?: Record<string, unknown>;
 }
-
-export interface PaginatedMeta {
-  total?: number;
-  page?: number;
-  limit?: number;
-  nextCursor?: string;
-  hasMore?: boolean;
-}
-
-// ── Success responses ─────────────────────────────────────────
 
 export const sendSuccess = <T>(
   res: Response,
@@ -30,22 +23,12 @@ export const sendSuccess = <T>(
   return res.status(statusCode).json(response);
 };
 
-export const sendCreated = <T>(
-  res: Response,
-  data: T,
-  message = 'Created successfully',
-): Response => sendSuccess(res, data, message, 201);
+export const sendCreated = <T>(res: Response, data: T, message = 'Created successfully'): Response =>
+  sendSuccess(res, data, message, 201);
 
 export const sendNoContent = (res: Response): Response => res.status(204).send();
 
-// ── Error responses ───────────────────────────────────────────
-
-export const sendError = (
-  res: Response,
-  message: string,
-  statusCode = 500,
-  errors?: unknown[],
-): Response => {
+export const sendError = (res: Response, message: string, statusCode = 500, errors?: unknown[]): Response => {
   const response: Record<string, unknown> = { success: false, message };
   if (errors?.length) response.errors = errors;
   return res.status(statusCode).json(response);

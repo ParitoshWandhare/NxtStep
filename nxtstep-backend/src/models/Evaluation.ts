@@ -1,3 +1,8 @@
+// ============================================================
+// NxtStep — Evaluation Model
+// Per-question evaluation with AI scores and feedback.
+// ============================================================
+
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IScores {
@@ -36,45 +41,38 @@ const scoreConstraints = { type: Number, min: 0, max: 10, required: true };
 
 const scoresSchema = new Schema<IScores>(
   {
-    technical:      scoreConstraints,
-    communication:  scoreConstraints,
+    technical: scoreConstraints,
+    communication: scoreConstraints,
     problemSolving: scoreConstraints,
-    confidence:     scoreConstraints,
-    conceptDepth:   scoreConstraints,
+    confidence: scoreConstraints,
+    conceptDepth: scoreConstraints,
   },
   { _id: false },
 );
 
 const evaluationSchema = new Schema<IEvaluation>(
   {
-    sessionId: {
-      type: Schema.Types.ObjectId,
-      ref: 'InterviewSession',
-      required: true,
-      index: true,
-    },
+    sessionId: { type: Schema.Types.ObjectId, ref: 'InterviewSession', required: true, index: true },
     questionId: { type: String, required: true },
     answerText: { type: String, required: true, maxlength: 10000 },
     scores: { type: scoresSchema, required: true },
     detectedKeywords: { type: [String], default: [] },
     missingKeywords: { type: [String], default: [] },
     feedback: {
-      strengths:    { type: [String], default: [] },
-      weaknesses:   { type: [String], default: [] },
+      strengths: { type: [String], default: [] },
+      weaknesses: { type: [String], default: [] },
       improvements: { type: [String], default: [] },
     },
     followUp: {
       shouldAsk: { type: Boolean, default: false },
-      reason:    { type: String, default: '' },
+      reason: { type: String, default: '' },
     },
-    promptHash:           { type: String },
-    modelUsed:            { type: String },
-    evaluationLatencyMs:  { type: Number },
+    promptHash: { type: String },
+    modelUsed: { type: String },
+    evaluationLatencyMs: { type: Number },
   },
   { timestamps: true },
 );
-
-// ── Compound index for fast per-session lookups ────────────────
 
 evaluationSchema.index({ sessionId: 1, questionId: 1 });
 evaluationSchema.index({ sessionId: 1, createdAt: 1 });

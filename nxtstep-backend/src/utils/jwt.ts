@@ -1,3 +1,7 @@
+// ============================================================
+// NxtStep — JWT Utilities
+// ============================================================
+
 import jwt, { SignOptions } from 'jsonwebtoken';
 import { env } from '../config/env';
 
@@ -15,8 +19,6 @@ export interface EphemeralTokenPayload {
   iat?: number;
   exp?: number;
 }
-
-// ── Token signing ─────────────────────────────────────────────
 
 export const signToken = (
   payload: Omit<JwtPayload, 'iat' | 'exp'>,
@@ -39,25 +41,16 @@ export const signEphemeralToken = (payload: Omit<EphemeralTokenPayload, 'iat' | 
   return jwt.sign(payload, env.JWT_SECRET, options);
 };
 
-// ── Token verification ────────────────────────────────────────
-
-export const verifyToken = <T>(
-  token: string,
-  audience?: string,
-): T => {
+export const verifyToken = <T>(token: string, audience?: string): T => {
   return jwt.verify(token, env.JWT_SECRET, {
     issuer: 'nxtstep.app',
     audience: audience ?? ['nxtstep-client', 'nxtstep-interview'],
   }) as T;
 };
 
-// ── Token decoding (no verification — for debugging only) ─────
-
 export const decodeToken = <T>(token: string): T | null => {
   return jwt.decode(token) as T | null;
 };
-
-// ── Token expiry check ────────────────────────────────────────
 
 export const isTokenExpired = (token: string): boolean => {
   const decoded = decodeToken<{ exp?: number }>(token);

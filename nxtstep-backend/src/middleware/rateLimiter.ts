@@ -1,49 +1,61 @@
+// ============================================================
+// NxtStep — Rate Limiter Middleware
+// ============================================================
+
 import rateLimit from 'express-rate-limit';
 import { env } from '../config/env';
+import { logger } from '../utils/logger';
 
-// ── Helper to create consistent limiter config ────────────────
-
-const createLimiter = (max: number, windowMs: number, message: string) =>
-  rateLimit({
-    windowMs,
-    max,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    message: { success: false, message },
-    skipSuccessfulRequests: false,
-    // Use X-Forwarded-For when behind a proxy
-    keyGenerator: (req) =>
-      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ??
-      req.ip ??
-      'unknown',
+const rateLimitHandler = (req: any, res: any) => {
+  logger.warn({ ip: req.ip, path: req.path }, 'Rate limit exceeded');
+  res.status(429).json({
+    success: false,
+    error: {
+      code: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many requests. Please slow down.',
+      retryAfter: Math.ceil(req.rateLimit?.resetTime ? (req.rateLimit.resetTime - Date.now()) / 1000 : 60),
+    },
   });
+};
 
-// ── 15-minute window limiters ─────────────────────────────────
+/** General API rate limiter */
+export const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: env.RATE_LIMIT_GLOBAL_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+  skip: () => process.env.NODE_ENV === 'test',
+});
 
-export const globalLimiter = createLimiter(
-  env.RATE_LIMIT_GLOBAL_MAX,
-  15 * 60 * 1000,
-  'Too many requests — please try again in 15 minutes',
-);
+/** Stricter limiter for auth endpoints */
+export const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+  skip: (req) => process.env.NODE_ENV === 'test',
+  message: 'Too many authentication attempts',
+});
 
-export const authLimiter = createLimiter(
-  env.RATE_LIMIT_AUTH_MAX,
-  15 * 60 * 1000,
-  'Too many authentication attempts — please try again in 15 minutes',
-);
+/** Very strict limiter for password reset */
+export const passwordResetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+  skip: (req) => process.env.NODE_ENV === 'test',
+});
 
-// ── 1-minute window limiter for interview events ──────────────
-
-export const interviewLimiter = createLimiter(
-  env.RATE_LIMIT_INTERVIEW_MAX,
-  60 * 1000,
-  'Interview event rate limit exceeded — slow down',
-);
-
-// ── Strict limiter for password reset ─────────────────────────
-
-export const passwordResetLimiter = createLimiter(
-  5,
-  60 * 60 * 1000, // 5 per hour
-  'Too many password reset requests — please try again in an hour',
-);
+/** Interview start limiter (prevent abuse) */
+export const interviewLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: env.RATE_LIMIT_INTERVIEW_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+  skip: () => process.env.NODE_ENV === 'test',
+  keyGenerator: (req: any) => req.user?.userId ?? req.ip,
+});

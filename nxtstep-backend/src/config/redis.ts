@@ -1,11 +1,19 @@
-import { createClient, RedisClientType } from 'redis';
+// ============================================================
+// NxtStep — Redis Configuration
+// Connection management with graceful degradation:
+// if Redis is unavailable, caching silently no-ops.
+// ============================================================
+
+import { createClient } from 'redis';
 import { env } from './env';
 import { logger } from '../utils/logger';
 
-let redisClient: ReturnType<typeof createClient>;
+type RedisClient = ReturnType<typeof createClient>;
+
+let redisClient: RedisClient;
 let isConnected = false;
 
-const createRedisClient = () => {
+const createRedisClient = (): RedisClient => {
   const client = createClient({
     url: env.REDIS_URL,
     socket: {
@@ -20,38 +28,21 @@ const createRedisClient = () => {
       },
       connectTimeout: 10_000,
     },
-    pingInterval: 30_000,  // Keep-alive every 30 seconds
+    pingInterval: 30_000,
   });
 
-  client.on('connect', () => {
-    isConnected = true;
-    logger.info('✅ Redis connected');
-  });
-
-  client.on('ready', () => {
-    isConnected = true;
-    logger.debug('Redis ready');
-  });
-
+  client.on('connect', () => { isConnected = true; logger.info('✅ Redis connected'); });
+  client.on('ready', () => { isConnected = true; });
   client.on('error', (err) => {
     isConnected = false;
-    // Don't crash on Redis errors — gracefully degrade
-    if (err.message.includes('ECONNREFUSED')) {
+    if (err.message?.includes('ECONNREFUSED')) {
       logger.warn('Redis connection refused — caching disabled');
     } else {
       logger.error('Redis error:', err.message);
     }
   });
-
-  client.on('reconnecting', () => {
-    isConnected = false;
-    logger.warn('Redis reconnecting...');
-  });
-
-  client.on('end', () => {
-    isConnected = false;
-    logger.warn('Redis connection closed');
-  });
+  client.on('reconnecting', () => { isConnected = false; logger.warn('Redis reconnecting...'); });
+  client.on('end', () => { isConnected = false; });
 
   return client;
 };
@@ -61,30 +52,31 @@ export const connectRedis = async (): Promise<void> => {
     redisClient = createRedisClient();
     await redisClient.connect();
   } catch (err) {
-    logger.error('Failed to connect to Redis:', err instanceof Error ? err.message : err);
-    // In production, we might want to continue without Redis (degraded mode)
-    if (env.NODE_ENV === 'production') {
-      logger.warn('⚠️  Running without Redis — caching disabled');
+    logger.error('Failed to connect Redis:', (err as Error).message);
+    if (env.NODE_ENV !== 'production') {
+      logger.warn('⚠️  Running without Redis (dev mode)');
     }
   }
 };
 
 export const disconnectRedis = async (): Promise<void> => {
   if (redisClient && isConnected) {
-    await redisClient.quit();
-    logger.info('Redis disconnected gracefully');
+    try {
+      await redisClient.quit();
+      logger.info('Redis disconnected gracefully');
+    } catch (err) {
+      logger.error('Error disconnecting Redis:', err);
+    }
   }
 };
 
-// ── Safe Redis wrapper — never throws, degrades gracefully ────
+// ─── Safe wrappers — never throw ──────────────────────────────
 
 export const safeRedisGet = async (key: string): Promise<string | null> => {
   try {
     if (!redisClient || !isConnected) return null;
     return await redisClient.get(key);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 };
 
 export const safeRedisSet = async (
@@ -100,9 +92,7 @@ export const safeRedisSet = async (
       await redisClient.set(key, value);
     }
     return true;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 };
 
 export const safeRedisDel = async (key: string): Promise<boolean> => {
@@ -110,15 +100,19 @@ export const safeRedisDel = async (key: string): Promise<boolean> => {
     if (!redisClient || !isConnected) return false;
     await redisClient.del(key);
     return true;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
+};
+
+export const safeRedisKeys = async (pattern: string): Promise<string[]> => {
+  try {
+    if (!redisClient || !isConnected) return [];
+    return await redisClient.keys(pattern);
+  } catch { return []; }
 };
 
 export const getRedisStatus = () => ({
   isConnected,
-  url: env.REDIS_URL.replace(/:[^:@]*@/, ':***@'), // Mask password in logs
+  url: env.REDIS_URL.replace(/:[^:@]*@/, ':***@'),
 });
 
-// Export the client — callers should use safeRedis* wrappers
 export { redisClient };

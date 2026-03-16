@@ -1,138 +1,80 @@
+// ============================================================
+// NxtStep — Error Handler Middleware
+// ============================================================
+
 import { Request, Response, NextFunction } from 'express';
-import { ZodError } from 'zod';
-import mongoose from 'mongoose';
 import { logger } from '../utils/logger';
-import { env } from '../config/env';
+import { sendError } from '../utils/apiResponse';
 
 export interface AppError extends Error {
   statusCode?: number;
+  code?: string;
   isOperational?: boolean;
-  code?: number | string;
-  errors?: unknown[];
 }
 
-// ── Central error handler ─────────────────────────────────────
+export const createError = (message: string, statusCode = 500, code?: string): AppError => {
+  const err: AppError = new Error(message);
+  err.statusCode = statusCode;
+  err.code = code;
+  err.isOperational = true;
+  return err;
+};
+
+export const notFoundHandler = (req: Request, res: Response): void => {
+  res.status(404).json({
+    success: false,
+    error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` },
+  });
+};
 
 export const errorHandler = (
   err: AppError,
   req: Request,
   res: Response,
-  _next: NextFunction,
+  _next: NextFunction
 ): void => {
-  let statusCode = err.statusCode ?? 500;
-  let message = err.message ?? 'Internal server error';
-  let errors: unknown[] | undefined;
+  const statusCode = err.statusCode ?? 500;
+  const isOperational = err.isOperational ?? false;
 
-  // ── Mongoose validation error ────────────────────────────────
-  if (err instanceof mongoose.Error.ValidationError) {
-    statusCode = 400;
-    message = 'Validation failed';
-    errors = Object.values(err.errors).map((e) => {
-      const validatorError = e as mongoose.Error.ValidatorError;
-      return {
-        field: validatorError.path,
-        message: validatorError.message,
-      };
-    });
-  }
-
-  // ── Mongoose duplicate key error ─────────────────────────────
-  else if (err.code === 11000) {
-    statusCode = 409;
-    const field = extractDuplicateField(err.message);
-    message = `${field} already exists`;
-  }
-
-  // ── Mongoose cast error (invalid ObjectId) ───────────────────
-  else if (err instanceof mongoose.Error.CastError) {
-    statusCode = 400;
-    message = `Invalid ${err.path}: ${err.value}`;
-  }
-
-  // ── Zod validation error ─────────────────────────────────────
-  else if (err instanceof ZodError) {
-    statusCode = 400;
-    message = 'Validation failed';
-    errors = err.errors.map((e) => ({
-      field: e.path.join('.'),
-      message: e.message,
-    }));
-  }
-
-  // ── JWT errors ───────────────────────────────────────────────
-  else if (err.name === 'JsonWebTokenError') {
-    statusCode = 401;
-    message = 'Invalid token';
-  } else if (err.name === 'TokenExpiredError') {
-    statusCode = 401;
-    message = 'Token expired';
-  } else if (err.name === 'NotBeforeError') {
-    statusCode = 401;
-    message = 'Token not yet valid';
-  }
-
-  // ── Log server errors ─────────────────────────────────────────
+  // Log everything, but only print stack for unexpected errors
   if (statusCode >= 500) {
-    logger.error(
-      {
-        err,
-        method: req.method,
-        url: req.url,
-        statusCode,
-        userId: (req as { user?: { userId?: string } }).user?.userId,
-      },
-      'Server error',
-    );
+    logger.error({ err, path: req.path, method: req.method, statusCode }, 'Unhandled error');
+  } else {
+    logger.warn({ code: err.code, message: err.message, path: req.path }, 'Operational error');
   }
 
-  const response: Record<string, unknown> = {
-    success: false,
-    message,
-    ...(errors && { errors }),
-  };
-
-  // Include stack trace in development only
-  if (env.NODE_ENV === 'development' && statusCode >= 500) {
-    response.stack = err.stack;
+  // Mongoose validation error
+  if (err.name === 'ValidationError') {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'Validation failed', details: err.message },
+    });
+    return;
   }
 
-  res.status(statusCode).json(response);
-};
+  // Mongoose duplicate key
+  if ((err as any).code === 11000) {
+    const field = Object.keys((err as any).keyValue ?? {})[0] ?? 'field';
+    res.status(409).json({
+      success: false,
+      error: { code: 'DUPLICATE_KEY', message: `${field} already exists` },
+    });
+    return;
+  }
 
-// ── 404 handler ───────────────────────────────────────────────
+  // Mongoose cast error (invalid ObjectId etc)
+  if (err.name === 'CastError') {
+    res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_ID', message: 'Invalid ID format' },
+    });
+    return;
+  }
 
-export const notFoundHandler = (req: Request, res: Response): void => {
-  res.status(404).json({
-    success: false,
-    message: `Route ${req.method} ${req.path} not found`,
-  });
-};
+  const message =
+    isOperational || process.env.NODE_ENV !== 'production'
+      ? err.message
+      : 'An unexpected error occurred';
 
-// ── Async handler wrapper (eliminates try/catch boilerplate) ──
-
-export const asyncHandler = <T extends Request = Request>(
-  fn: (req: T, res: Response, next: NextFunction) => Promise<void>,
-) => {
-  return (req: T, res: Response, next: NextFunction): void => {
-    Promise.resolve(fn(req, res, next)).catch(next);
-  };
-};
-
-// ── Create operational error ──────────────────────────────────
-
-export const createError = (
-  message: string,
-  statusCode: number,
-): AppError => {
-  const error: AppError = new Error(message);
-  error.statusCode = statusCode;
-  error.isOperational = true;
-  return error;
-};
-
-// ── Helpers ───────────────────────────────────────────────────
-
-const extractDuplicateField = (message: string): string => {
-  const match = message.match(/index: (\w+)_/);
-  return match ? match[1] : 'Field';
+  sendError(res, message, statusCode, err.code);
 };

@@ -1,3 +1,9 @@
+// ============================================================
+// NxtStep — Database Configuration
+// MongoDB connection with retry logic, health monitoring,
+// connection pooling, and graceful shutdown.
+// ============================================================
+
 import mongoose from 'mongoose';
 import { env } from './env';
 import { logger } from '../utils/logger';
@@ -31,44 +37,24 @@ export const connectDB = async (): Promise<void> => {
     } catch (error) {
       retryCount++;
       logger.error(
-        `❌ MongoDB connection attempt ${retryCount}/${MAX_RETRIES} failed:`,
-        error instanceof Error ? error.message : error,
+        `❌ MongoDB connection attempt ${retryCount}/${MAX_RETRIES}: ${(error as Error).message}`,
       );
 
       if (retryCount >= MAX_RETRIES) {
-        logger.error('MongoDB connection failed after maximum retries. Exiting.');
-        process.exit(1);
+        logger.error('MongoDB connection failed after max retries');
+        if (env.NODE_ENV === 'production') process.exit(1);
+        return;
       }
 
-      logger.info(`Retrying in ${RETRY_DELAY_MS / 1000}s...`);
-      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
     }
   }
 };
 
-// ── Connection lifecycle events ───────────────────────────────
-
-mongoose.connection.on('connected', () => {
-  isConnected = true;
-  logger.info('MongoDB connection established');
-});
-
-mongoose.connection.on('disconnected', () => {
-  isConnected = false;
-  logger.warn('MongoDB disconnected');
-});
-
-mongoose.connection.on('reconnected', () => {
-  isConnected = true;
-  logger.info('MongoDB reconnected');
-});
-
-mongoose.connection.on('error', (err) => {
-  logger.error('MongoDB connection error:', err.message);
-  isConnected = false;
-});
-
-// ── Graceful shutdown ─────────────────────────────────────────
+mongoose.connection.on('connected', () => { isConnected = true; logger.info('MongoDB connection established'); });
+mongoose.connection.on('disconnected', () => { isConnected = false; logger.warn('MongoDB disconnected'); });
+mongoose.connection.on('reconnected', () => { isConnected = true; logger.info('MongoDB reconnected'); });
+mongoose.connection.on('error', (err) => { logger.error('MongoDB error:', err.message); isConnected = false; });
 
 export const disconnectDB = async (): Promise<void> => {
   if (!isConnected) return;
@@ -77,7 +63,7 @@ export const disconnectDB = async (): Promise<void> => {
     isConnected = false;
     logger.info('MongoDB connection closed gracefully');
   } catch (err) {
-    logger.error('Error closing MongoDB connection:', err);
+    logger.error('Error closing MongoDB:', err);
   }
 };
 

@@ -1,7 +1,7 @@
 node_modules/
 dist/
 .env
-*.log
-coverage/
 uploads/
+*.log
 .DS_Store
+coverage/

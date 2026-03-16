@@ -1,91 +1,94 @@
+// ============================================================
+// NxtStep — Socket.IO Server
+// Real-time interview events: question ready, evaluation done, etc.
+// ============================================================
+
 import { Server as HttpServer } from 'http';
-import { Server as SocketIOServer, Socket } from 'socket.io';
-import { env } from '../config/env';
-import { verifyToken, EphemeralTokenPayload } from '../utils/jwt';
+import { Server as IOServer, Socket } from 'socket.io';
+import { verifyToken, JwtPayload } from '../utils/jwt';
 import { logger } from '../utils/logger';
+import { env } from '../config/env';
 
-let io: SocketIOServer;
+let io: IOServer | null = null;
 
-// Map: sessionId -> Set of socket ids
-const sessionRooms = new Map<string, Set<string>>();
-
-export const initSockets = (httpServer: HttpServer): SocketIOServer => {
-  io = new SocketIOServer(httpServer, {
+export const initSocket = (httpServer: HttpServer): IOServer => {
+  io = new IOServer(httpServer, {
     cors: {
       origin: env.CLIENT_URL,
       methods: ['GET', 'POST'],
       credentials: true,
     },
-    transports: ['websocket', 'polling'],
+    pingTimeout: 60000,
+    pingInterval: 25000,
   });
 
-  // Auth middleware for interview session sockets
-  io.use((socket, next) => {
-    const token = socket.handshake.auth.token as string;
-    if (!token) {
-      return next(new Error('Authentication required'));
-    }
+  // Auth middleware for socket connections
+  io.use((socket: Socket, next) => {
+    const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.split(' ')[1];
+    if (!token) return next(new Error('Authentication required'));
+
     try {
-      const payload = verifyToken<EphemeralTokenPayload>(token);
-      socket.data.sessionId = payload.sessionId;
-      socket.data.userId = payload.userId;
+      const payload = verifyToken<JwtPayload>(token);
+      (socket as any).user = payload;
       next();
     } catch {
-      return next(new Error('Invalid or expired token'));
+      next(new Error('Invalid token'));
     }
   });
 
   io.on('connection', (socket: Socket) => {
-    const { sessionId, userId } = socket.data as { sessionId: string; userId: string };
-    logger.debug(`Socket connected: ${socket.id} | session: ${sessionId} | user: ${userId}`);
+    const user = (socket as any).user as JwtPayload;
+    logger.debug({ userId: user.userId, socketId: socket.id }, 'Socket connected');
 
-    // Join session room
-    socket.join(`session:${sessionId}`);
+    // Join user-specific room
+    socket.join(`user:${user.userId}`);
 
-    if (!sessionRooms.has(sessionId)) sessionRooms.set(sessionId, new Set());
-    sessionRooms.get(sessionId)!.add(socket.id);
+    // Join session room when interview starts
+    socket.on('join:session', (sessionId: string) => {
+      socket.join(`session:${sessionId}`);
+      logger.debug({ userId: user.userId, sessionId }, 'Joined session room');
+    });
 
-    socket.on('disconnect', () => {
-      logger.debug(`Socket disconnected: ${socket.id}`);
-      sessionRooms.get(sessionId)?.delete(socket.id);
+    socket.on('leave:session', (sessionId: string) => {
+      socket.leave(`session:${sessionId}`);
+    });
+
+    socket.on('disconnect', (reason) => {
+      logger.debug({ userId: user.userId, socketId: socket.id, reason }, 'Socket disconnected');
+    });
+
+    socket.on('error', (err) => {
+      logger.warn({ err, userId: user.userId }, 'Socket error');
     });
   });
 
-  logger.info('✅ Socket.IO initialized');
+  logger.info('Socket.IO initialized');
   return io;
 };
 
-export const getIO = (): SocketIOServer => {
-  if (!io) throw new Error('Socket.IO not initialized');
-  return io;
+// ── Emit helpers (called from workers/services) ───────────────
+export const emitToUser = (userId: string, event: string, data: unknown) => {
+  io?.to(`user:${userId}`).emit(event, data);
 };
 
-// ─── Notification Emitters ────────────────────────────────────────────────────
-
-export const notifyQuestionReady = (sessionId: string, question: unknown) => {
-  getIO().to(`session:${sessionId}`).emit('question:ready', { question });
+export const emitToSession = (sessionId: string, event: string, data: unknown) => {
+  io?.to(`session:${sessionId}`).emit(event, data);
 };
 
-export const notifyEvaluationReady = (sessionId: string, evaluation: unknown) => {
-  getIO().to(`session:${sessionId}`).emit('evaluation:ready', { evaluation });
-};
+// Events emitted by workers:
+export const emitQuestionReady = (sessionId: string, question: unknown) =>
+  emitToSession(sessionId, 'question:ready', question);
 
-export const notifyFollowUpReady = (sessionId: string, followUp: unknown) => {
-  getIO().to(`session:${sessionId}`).emit('followup:ready', { followUp });
-};
+export const emitEvaluationComplete = (sessionId: string, evaluation: unknown) =>
+  emitToSession(sessionId, 'evaluation:complete', evaluation);
 
-export const notifyScorecardReady = (sessionId: string, scorecard: unknown) => {
-  getIO().to(`session:${sessionId}`).emit('scorecard:ready', { scorecard });
-};
+export const emitScorecardReady = (sessionId: string, scorecard: unknown) =>
+  emitToSession(sessionId, 'scorecard:ready', scorecard);
 
-export const notifyRecommendationsReady = (sessionId: string, recommendations: unknown) => {
-  getIO().to(`session:${sessionId}`).emit('recommendations:ready', { recommendations });
-};
+export const emitRecommendationsReady = (sessionId: string, recommendations: unknown) =>
+  emitToSession(sessionId, 'recommendations:ready', recommendations);
 
-export const notifyInterviewTerminated = (sessionId: string, reason: string) => {
-  getIO().to(`session:${sessionId}`).emit('interview:terminated', { reason });
-};
+export const emitSessionTerminated = (sessionId: string, reason: string) =>
+  emitToSession(sessionId, 'session:terminated', { reason });
 
-export const notifyWorkerError = (sessionId: string, message: string) => {
-  getIO().to(`session:${sessionId}`).emit('worker:error', { message });
-};
+export const getIO = (): IOServer | null => io;
