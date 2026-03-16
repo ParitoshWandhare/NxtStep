@@ -36,7 +36,6 @@ export const errorHandler = (
   const statusCode = err.statusCode ?? 500;
   const isOperational = err.isOperational ?? false;
 
-  // Log everything, but only print stack for unexpected errors
   if (statusCode >= 500) {
     logger.error({ err, path: req.path, method: req.method, statusCode }, 'Unhandled error');
   } else {
@@ -76,5 +75,5 @@ export const errorHandler = (
       ? err.message
       : 'An unexpected error occurred';
 
-  sendError(res, message, statusCode, err.code);
+  sendError(res, message, statusCode, err.code ? [err.code] : undefined);
 };

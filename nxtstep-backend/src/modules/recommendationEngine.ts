@@ -8,8 +8,8 @@ import { Scorecard } from '../models/Scorecard';
 import { RecommendedRole, RoleFeedback } from '../models/Recommendations';
 import { InterviewSession } from '../models/InterviewSession';
 import { User } from '../models/User';
-import { roleDatabase, IRoleTemplate } from '../data/roleDatabase';
-import { aiAdapter } from '../ai/aiAdapter';
+import { ROLE_DATABASE, RoleTemplate } from '../data/roleDatabase';
+import { aiAdapter, AIMessage } from '../ai/aiAdapter';
 import { buildRoleDescriptionPrompt } from '../ai/prompts';
 import { emitRecommendationsReady } from '../sockets/index';
 import { logger } from '../utils/logger';
@@ -44,7 +44,7 @@ const mapSkillToDimension = (skillName: string): string => {
 };
 
 // ── Compute individual match dimensions ──────────────────────
-const computeSkillMatch = (scores: Record<string, number>, role: IRoleTemplate): number => {
+const computeSkillMatch = (scores: Record<string, number>, role: RoleTemplate): number => {
   if (!role.skills?.length) return 0.5;
   let totalWeight = 0;
   let matchedWeight = 0;
@@ -55,7 +55,6 @@ const computeSkillMatch = (scores: Record<string, number>, role: IRoleTemplate):
     const score = scores[dim] ?? 5;
     const threshold = (role.minThresholds as any)?.[dim] ?? 5;
     if (score >= threshold) matchedWeight += w;
-    // Partial credit: 50% weight if within 1.5 points of threshold
     else if (score >= threshold - 1.5) matchedWeight += w * 0.5;
   }
   return totalWeight > 0 ? Math.min(matchedWeight / totalWeight, 1) : 0.5;
@@ -80,8 +79,8 @@ const computePreferenceMatch = (prefs: string[], roleCategory: string, roleTitle
   return Math.min(hits / prefs.length + 0.2, 1);
 };
 
-// ── Resume keyword match (lightweight, no ML deps) ───────────
-const computeResumeMatch = (resumeText: string | undefined, role: IRoleTemplate): number => {
+// ── Resume keyword match ──────────────────────────────────────
+const computeResumeMatch = (resumeText: string | undefined, role: RoleTemplate): number => {
   if (!resumeText) return 0.5;
   const resumeLower = resumeText.toLowerCase();
   const skillNames = role.skills.map((s) => s.name.toLowerCase());
@@ -99,14 +98,22 @@ export const generateRecommendations = async (sessionId: string, userId: string)
 
   if (!scorecard) throw createError('Scorecard not found for session', 404, 'SCORECARD_NOT_FOUND');
 
-  const overall = (scorecard as any).scores.overall;
-  const sessionDifficulty = (session as any)?.difficulty ?? 'mid';
+  const sc = scorecard as any;
+  const overall: number = sc.overall ?? sc.scores?.overall ?? 0;
+  const sessionDifficulty: string = (session as any)?.difficulty ?? 'mid';
   const userPreferences: string[] = (user as any)?.rolePreferences ?? [];
   const resumeText: string | undefined = (user as any)?.resumeText;
-  const scores: Record<string, number> = (scorecard as any).scores;
+
+  const scores: Record<string, number> = {
+    technical: sc.technical ?? sc.scores?.technical ?? 5,
+    problemSolving: sc.problemSolving ?? sc.scores?.problemSolving ?? 5,
+    communication: sc.communication ?? sc.scores?.communication ?? 5,
+    confidence: sc.confidence ?? sc.scores?.confidence ?? 5,
+    conceptDepth: sc.conceptDepth ?? sc.scores?.conceptDepth ?? 5,
+  };
 
   // Score all roles
-  const scoredRoles = roleDatabase.map((role) => {
+  const scoredRoles = ROLE_DATABASE.map((role) => {
     const skillMatch = computeSkillMatch(scores, role);
     const levelMatch = computeLevelMatch(overall, role.level, sessionDifficulty);
     const preferenceMatch = computePreferenceMatch(userPreferences, role.category, role.title);
@@ -131,21 +138,31 @@ export const generateRecommendations = async (sessionId: string, userId: string)
   // AI-enrich in parallel (fail-safe: gracefully degrade)
   const enriched = await Promise.all(
     topRoles.map(async ({ role, matchScore, breakdown }) => {
-      let explanation = `Strong match for ${role.title} based on your interview performance.`;
-      let studyResources: string[] = [];
-      let interviewTips: string[] = [];
+      let description = `Strong match for ${role.title} based on your interview performance.`;
+      let whyMatch = `Your profile aligns well with the ${role.category} requirements.`;
+      let tips: string[] = [];
 
       try {
-        const prompt = buildRoleDescriptionPrompt(role.title, role.category, scores);
-        const enrichment = await aiAdapter.sendJSON<{
-          explanation: string;
-          studyResources: string[];
-          interviewTips: string[];
-        }>(prompt, { temperature: 0.4, maxTokens: 500 });
+        const promptObj = buildRoleDescriptionPrompt({
+          title: role.title,
+          skills: role.skills.map((s) => s.name),
+          scorecard: scores,
+        });
 
-        explanation = enrichment.explanation ?? explanation;
-        studyResources = enrichment.studyResources ?? [];
-        interviewTips = enrichment.interviewTips ?? [];
+        const messages: AIMessage[] = [
+          { role: 'system', content: promptObj.system },
+          { role: 'user', content: promptObj.user },
+        ];
+
+        const enrichment = await aiAdapter.sendJSON<{
+          description: string;
+          whyMatch: string;
+          tips: string[];
+        }>(messages, { temperature: 0.4, maxTokens: 500 });
+
+        description = enrichment.description ?? description;
+        whyMatch = enrichment.whyMatch ?? whyMatch;
+        tips = enrichment.tips ?? [];
       } catch (err) {
         logger.warn({ err, roleId: role.id }, 'AI enrichment failed — using defaults');
       }
@@ -155,13 +172,16 @@ export const generateRecommendations = async (sessionId: string, userId: string)
         title: role.title,
         category: role.category,
         level: role.level,
+        description,
+        whyMatch,
+        requiredSkills: role.skills,
         matchScore,
         breakdown,
-        explanation,
-        studyResources,
-        interviewTips,
+        explanation: [`${role.title} matches your ${sessionDifficulty} level profile`],
+        studyResources: [],
+        interviewTips: tips,
         salaryRange: role.salaryRange,
-        growthPath: role.growthPath,
+        growthPath: role.growthPath ?? [],
       };
     })
   );
@@ -194,13 +214,13 @@ export const submitFeedback = async (params: {
   signal: 'relevant' | 'not_relevant' | 'applied' | 'saved';
   matchScore: number;
 }) => {
-  const { userId, sessionId, roleTitle, ...rest } = params;
+  const { userId, sessionId, roleTitle, roleCategory, roleLevel, signal, matchScore } = params;
   const fb = await RoleFeedback.findOneAndUpdate(
     { userId, sessionId, roleTitle },
-    { $set: rest },
+    { $set: { roleCategory, roleLevel, signal, matchScore } },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   );
-  logger.info({ userId, sessionId, roleTitle, signal: params.signal }, 'Role feedback recorded');
+  logger.info({ userId, sessionId, roleTitle, signal }, 'Role feedback recorded');
   return fb;
 };
 
@@ -213,12 +233,11 @@ export const getCustomRecommendations = async (
 ) => {
   const user = await User.findById(userId).lean();
 
-  // Build a synthetic scores object from declared skills
   const syntheticScores: Record<string, number> = {
     technical: 6, problemSolving: 6, communication: 6, confidence: 6, conceptDepth: 6,
   };
 
-  const filtered = roleDatabase.filter((r) => {
+  const filtered = ROLE_DATABASE.filter((r) => {
     if (preferredLevel && r.level !== preferredLevel) return false;
     if (preferredCategories?.length && !preferredCategories.includes(r.category)) return false;
     return true;
@@ -243,5 +262,12 @@ export const getCustomRecommendations = async (
   return scored
     .sort((a, b) => b.matchScore - a.matchScore)
     .slice(0, 8)
-    .map(({ role, matchScore }) => ({ title: role.title, category: role.category, level: role.level, matchScore, salaryRange: role.salaryRange, growthPath: role.growthPath }));
+    .map(({ role, matchScore }) => ({
+      title: role.title,
+      category: role.category,
+      level: role.level,
+      matchScore,
+      salaryRange: role.salaryRange,
+      growthPath: role.growthPath,
+    }));
 };

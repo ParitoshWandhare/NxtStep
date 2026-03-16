@@ -4,7 +4,7 @@
 
 import mongoose from 'mongoose';
 import { InterviewSession } from '../models/InterviewSession';
-import { addGenerateQuestionJob, addGenerateScorecardJob, addEvaluateAnswerJob } from '../queues';
+import { addGenerateQuestionJob, addEvaluateAnswerJob } from '../queues';
 import { signEphemeralToken } from '../utils/jwt';
 import { safeRedisSet, safeRedisGet, safeRedisDel } from '../config/redis';
 import { logger } from '../utils/logger';
@@ -25,21 +25,18 @@ export const startInterview = async (
     userId: new mongoose.Types.ObjectId(userId),
     role,
     difficulty,
-    customTopics: topics ?? [],
-    customJobDescription,
-    engineState: 'INIT',
     status: 'in_progress',
     questions: [],
     answers: [],
-    proctoringData: { tabSwitches: 0, faceWarnings: 0, isTerminated: false, events: [] },
-  });
+    proctoring: { tabSwitchCount: 0, cameraEvents: [], terminated: false },
+  } as any);
 
   // Enqueue first question generation
   await addGenerateQuestionJob({
     sessionId: session._id.toString(),
     userId,
     role,
-    topic: (topics?.[0]) ?? role,
+    topic: topics?.[0] ?? role,
     difficulty,
     questionIndex: 0,
     askedTopics: [],
@@ -47,10 +44,14 @@ export const startInterview = async (
   });
 
   // Ephemeral token scoped to this session (2h)
-  const sessionToken = signEphemeralToken({ userId, sessionId: session._id.toString() });
+  const sessionToken = signEphemeralToken({
+    userId,
+    sessionId: session._id.toString(),
+    type: 'interview_session',
+  });
 
   logger.info({ sessionId: session._id, userId, role }, 'Interview session started');
-  return { sessionId: session._id, sessionToken, status: 'initializing' };
+  return { sessionId: session._id.toString(), sessionToken, status: 'initializing' };
 };
 
 // ── Get Session ──────────────────────────────────────────────
@@ -59,14 +60,10 @@ export const getSession = async (sessionId: string, userId: string) => {
   const cached = await safeRedisGet(`session:${sessionId}`);
   if (cached) {
     const parsed = JSON.parse(cached);
-    if (parsed.userId === userId) return parsed;
+    if (parsed.userId?.toString() === userId) return parsed;
   }
 
-  const session = await InterviewSession.findOne({
-    _id: sessionId,
-    userId,
-  }).lean();
-
+  const session = await InterviewSession.findOne({ _id: sessionId, userId }).lean();
   if (!session) throw createError('Session not found', 404, 'SESSION_NOT_FOUND');
 
   await safeRedisSet(`session:${sessionId}`, JSON.stringify(session), SESSION_CACHE_TTL);
@@ -91,15 +88,16 @@ export const submitAnswer = async (
   const alreadyAnswered = session.answers.find((a) => a.questionId === questionId);
   if (alreadyAnswered) throw createError('Question already answered', 409, 'ALREADY_ANSWERED');
 
+  const now = new Date();
+  const start = durationMs ? new Date(now.getTime() - durationMs) : now;
+
   session.answers.push({
     questionId,
     answerText,
     answerAudioUrl,
-    startedAt: new Date(Date.now() - (durationMs ?? 0)),
-    submittedAt: new Date(),
+    timestamps: { start, end: now },
   } as any);
 
-  session.engineState = 'PROCESS_ANSWER';
   await session.save();
 
   // Invalidate cache
@@ -112,10 +110,10 @@ export const submitAnswer = async (
     userId,
     questionText: question.text,
     answerText,
-    topic: question.topic,
-    difficulty: session.difficulty as any,
+    topic: (question as any).topic ?? session.role,
+    difficulty: session.difficulty as 'junior' | 'mid' | 'senior',
     questionIndex: session.answers.length - 1,
-    totalQuestions: env.INTERVIEW_MAX_QUESTIONS,
+    totalQuestions: env.MAX_QUESTIONS_PER_SESSION,
     role: session.role,
   });
 
@@ -134,25 +132,30 @@ export const recordProctoringEvent = async (
   const session = await InterviewSession.findOne({ _id: sessionId, userId, status: 'in_progress' });
   if (!session) throw createError('Active session not found', 404, 'SESSION_NOT_FOUND');
 
-  session.proctoringData.events.push({ type: eventType as any, timestamp: new Date(timestamp), details });
+  const proctoring = session.proctoring as any;
 
   if (eventType === 'tab_switch') {
-    session.proctoringData.tabSwitches += 1;
-    if (session.proctoringData.tabSwitches >= env.PROCTORING_MAX_TAB_SWITCHES) {
-      session.proctoringData.isTerminated = true;
+    proctoring.tabSwitchCount = (proctoring.tabSwitchCount ?? 0) + 1;
+    if (proctoring.tabSwitchCount >= env.TAB_SWITCH_TERMINATE_THRESHOLD) {
+      proctoring.terminated = true;
+      proctoring.terminationReason = 'Exceeded maximum tab switches';
       session.status = 'terminated';
-      session.terminationReason = 'Exceeded maximum tab switches';
     }
   }
 
   if (eventType === 'face_missing') {
-    session.proctoringData.faceWarnings += 1;
+    proctoring.cameraEvents = proctoring.cameraEvents ?? [];
+    proctoring.cameraEvents.push({
+      timestamp: new Date(timestamp),
+      eventType: 'face_absent',
+      details: details ? String(details.reason ?? '') : undefined,
+    });
   }
 
   if (eventType === 'termination') {
-    session.proctoringData.isTerminated = true;
+    proctoring.terminated = true;
+    proctoring.terminationReason = (details?.reason as string) ?? 'Proctoring violation';
     session.status = 'terminated';
-    session.terminationReason = (details?.reason as string) ?? 'Proctoring violation';
   }
 
   await session.save();
@@ -169,17 +172,16 @@ export const recordProctoringEvent = async (
 export const getSessionStatus = async (sessionId: string, userId: string) => {
   const session = await InterviewSession.findOne(
     { _id: sessionId, userId },
-    { status: 1, engineState: 1, questions: 1, answers: 1, 'proctoringData.isTerminated': 1 }
+    { status: 1, questions: 1, answers: 1, proctoring: 1 }
   ).lean();
 
   if (!session) throw createError('Session not found', 404, 'SESSION_NOT_FOUND');
 
   return {
     status: session.status,
-    engineState: session.engineState,
     questionsGenerated: session.questions?.length ?? 0,
     answersSubmitted: session.answers?.length ?? 0,
-    isTerminated: session.proctoringData?.isTerminated ?? false,
+    isTerminated: (session.proctoring as any)?.terminated ?? false,
   };
 };
 

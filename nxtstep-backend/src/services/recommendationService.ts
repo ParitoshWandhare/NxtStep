@@ -6,8 +6,8 @@ import { Scorecard } from '../models/Scorecard';
 import { RecommendedRole, RoleFeedback } from '../models/Recommendations';
 import { InterviewSession } from '../models/InterviewSession';
 import { User } from '../models/User';
-import { roleDatabase, IRoleTemplate } from '../data/roleDatabase';
-import { aiAdapter } from '../ai/aiAdapter';
+import { ROLE_DATABASE, RoleTemplate } from '../data/roleDatabase';
+import { aiAdapter, AIMessage } from '../ai/aiAdapter';
 import { buildRoleDescriptionPrompt } from '../ai/prompts';
 import { logger } from '../utils/logger';
 import { createError } from '../middleware/errorHandler';
@@ -23,7 +23,7 @@ const WEIGHTS = {
 // ── Skill matching ───────────────────────────────────────────
 const computeSkillMatch = (
   scorecardScores: Record<string, number>,
-  role: IRoleTemplate
+  role: RoleTemplate
 ): number => {
   if (!role.skills || role.skills.length === 0) return 0.5;
 
@@ -32,14 +32,10 @@ const computeSkillMatch = (
 
   for (const skill of role.skills) {
     totalWeight += skill.weight ?? 1;
-
     const dim = mapSkillToDimension(skill.name);
     const score = scorecardScores[dim] ?? 5;
-    const threshold = role.minThresholds?.[dim] ?? 5;
-
-    if (score >= threshold) {
-      matchedWeight += skill.weight ?? 1;
-    }
+    const threshold = (role.minThresholds as any)?.[dim] ?? 5;
+    if (score >= threshold) matchedWeight += skill.weight ?? 1;
   }
 
   return totalWeight > 0 ? matchedWeight / totalWeight : 0;
@@ -47,13 +43,11 @@ const computeSkillMatch = (
 
 const mapSkillToDimension = (skillName: string): string => {
   const name = skillName.toLowerCase();
-
   if (name.includes('communication') || name.includes('explain')) return 'communication';
   if (name.includes('problem') || name.includes('algorithm')) return 'problemSolving';
   if (name.includes('confidence') || name.includes('leadership')) return 'confidence';
   if (name.includes('depth') || name.includes('architecture') || name.includes('design'))
     return 'conceptDepth';
-
   return 'technical';
 };
 
@@ -67,12 +61,9 @@ const computeLevelMatch = (
     mid: [4.5, 7.5],
     senior: [6.5, 10],
   };
-
   const range = levelMap[roleLevel] ?? [0, 10];
   const inRange = overall >= range[0] && overall <= range[1];
-
   const difficultyMatch = sessionDifficulty === roleLevel ? 1 : 0.5;
-
   return inRange ? difficultyMatch : 0.2;
 };
 
@@ -82,13 +73,8 @@ const computePreferenceMatch = (
   roleTitle: string
 ): number => {
   if (!userPreferences || userPreferences.length === 0) return 0.5;
-
   const roleLower = `${roleCategory} ${roleTitle}`.toLowerCase();
-
-  const hits = userPreferences.filter((p) =>
-    roleLower.includes(p.toLowerCase())
-  ).length;
-
+  const hits = userPreferences.filter((p) => roleLower.includes(p.toLowerCase())).length;
   return Math.min(hits / userPreferences.length + 0.2, 1);
 };
 
@@ -104,30 +90,35 @@ export const generateRecommendations = async (sessionId: string, userId: string)
     throw createError('Scorecard not found for session', 404, 'SCORECARD_NOT_FOUND');
   }
 
-  const overall = scorecard.scores.overall;
-  const sessionDifficulty = (session?.difficulty ?? 'mid') as string;
-  const userPreferences: string[] = user?.rolePreferences ?? [];
+  const sc = scorecard as any;
+  const overall: number = sc.overall ?? sc.scores?.overall ?? 0;
+  const sessionDifficulty = (session as any)?.difficulty ?? 'mid';
+  const userPreferences: string[] = (user as any)?.rolePreferences ?? [];
 
-  const scoredRoles = roleDatabase.map((role) => {
-    const skillMatch = computeSkillMatch(scorecard.scores as any, role);
+  const scores: Record<string, number> = {
+    technical: sc.technical ?? sc.scores?.technical ?? 5,
+    problemSolving: sc.problemSolving ?? sc.scores?.problemSolving ?? 5,
+    communication: sc.communication ?? sc.scores?.communication ?? 5,
+    confidence: sc.confidence ?? sc.scores?.confidence ?? 5,
+    conceptDepth: sc.conceptDepth ?? sc.scores?.conceptDepth ?? 5,
+  };
+
+  const scoredRoles = ROLE_DATABASE.map((role) => {
+    const skillMatch = computeSkillMatch(scores, role);
     const levelMatch = computeLevelMatch(overall, role.level, sessionDifficulty);
-    const preferenceMatch = computePreferenceMatch(
-      userPreferences,
-      role.category,
-      role.title
-    );
-
+    const preferenceMatch = computePreferenceMatch(userPreferences, role.category, role.title);
     const resumeMatch = 0.5;
 
-    const matchScore =
+    const matchScore = parseFloat((
       skillMatch * WEIGHTS.skillMatch +
       levelMatch * WEIGHTS.levelMatch +
       preferenceMatch * WEIGHTS.preferenceMatch +
-      resumeMatch * WEIGHTS.resumeMatch;
+      resumeMatch * WEIGHTS.resumeMatch
+    ).toFixed(3));
 
     return {
       role,
-      matchScore: parseFloat(matchScore.toFixed(3)),
+      matchScore,
       breakdown: { skillMatch, levelMatch, preferenceMatch, resumeMatch },
     };
   });
@@ -140,17 +131,22 @@ export const generateRecommendations = async (sessionId: string, userId: string)
   const enriched = await Promise.all(
     topRoles.map(async ({ role, matchScore, breakdown }) => {
       try {
-        const prompt = buildRoleDescriptionPrompt(
-          role.title,
-          role.category,
-          scorecard.scores as any
-        );
+        const promptObj = buildRoleDescriptionPrompt({
+          title: role.title,
+          skills: role.skills.map((s) => s.name),
+          scorecard: scores,
+        });
+
+        const messages: AIMessage[] = [
+          { role: 'system', content: promptObj.system },
+          { role: 'user', content: promptObj.user },
+        ];
 
         const enrichment = await aiAdapter.sendJSON<{
-          explanation: string;
-          studyResources: string[];
-          interviewTips: string[];
-        }>(prompt, { temperature: 0.4, maxTokens: 600 });
+          description: string;
+          whyMatch: string;
+          tips: string[];
+        }>(messages, { temperature: 0.4, maxTokens: 600 });
 
         return {
           roleId: role.id,
@@ -159,9 +155,9 @@ export const generateRecommendations = async (sessionId: string, userId: string)
           level: role.level,
           matchScore,
           breakdown,
-          explanation: enrichment.explanation ?? `Strong match for ${role.title}`,
-          studyResources: enrichment.studyResources ?? [],
-          interviewTips: enrichment.interviewTips ?? [],
+          explanation: enrichment.description ?? `Strong match for ${role.title}`,
+          studyResources: [],
+          interviewTips: enrichment.tips ?? [],
           salaryRange: role.salaryRange,
           growthPath: role.growthPath,
         };
@@ -190,17 +186,12 @@ export const generateRecommendations = async (sessionId: string, userId: string)
   );
 
   logger.info({ sessionId, userId, topRoles: enriched.length }, 'Recommendations generated');
-
   return recommendation;
 };
 
 export const getRecommendations = async (sessionId: string, userId: string) => {
   const rec = await RecommendedRole.findOne({ sessionId, userId }).lean();
-
-  if (!rec) {
-    throw createError('Recommendations not found', 404, 'RECOMMENDATIONS_NOT_FOUND');
-  }
-
+  if (!rec) throw createError('Recommendations not found', 404, 'RECOMMENDATIONS_NOT_FOUND');
   return rec;
 };
 
@@ -218,8 +209,6 @@ export const submitRoleFeedback = async (
     { $set: { roleCategory, roleLevel, signal, matchScore } },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   );
-
   logger.info({ userId, sessionId, roleTitle, signal }, 'Role feedback recorded');
-
   return feedback;
 };

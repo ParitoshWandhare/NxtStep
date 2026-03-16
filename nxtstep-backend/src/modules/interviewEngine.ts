@@ -1,12 +1,12 @@
 // ============================================================
 // NxtStep — Interview Engine Module
 // Self-contained: types, state machine, question generation,
-// session orchestration. Replaces scattered interviewService logic.
+// session orchestration.
 // ============================================================
 
 import mongoose from 'mongoose';
 import { InterviewSession } from '../models/InterviewSession';
-import { aiAdapter } from '../ai/aiAdapter';
+import { aiAdapter, AIMessage } from '../ai/aiAdapter';
 import { buildQuestionGenerationPrompt, buildFollowUpPrompt } from '../ai/prompts';
 import { addGenerateQuestionJob, addEvaluateAnswerJob, addGenerateScorecardJob } from '../queues';
 import { signEphemeralToken } from '../utils/jwt';
@@ -64,14 +64,11 @@ export const startSession = async (params: SessionStartParams) => {
     userId: new mongoose.Types.ObjectId(userId),
     role,
     difficulty,
-    customTopics: topics ?? [],
-    customJobDescription,
-    engineState: 'INIT' as EngineState,
     status: 'in_progress' as SessionStatus,
     questions: [],
     answers: [],
-    proctoringData: { tabSwitches: 0, faceWarnings: 0, isTerminated: false, events: [] },
-  });
+    proctoring: { tabSwitchCount: 0, cameraEvents: [], terminated: false },
+  } as any);
 
   // Transition INIT → GENERATE_Q: enqueue first question
   await addGenerateQuestionJob({
@@ -85,9 +82,11 @@ export const startSession = async (params: SessionStartParams) => {
     askedQuestionIds: [],
   });
 
-  await InterviewSession.updateOne({ _id: session._id }, { $set: { engineState: 'GENERATE_Q' } });
-
-  const sessionToken = signEphemeralToken({ userId, sessionId: session._id.toString() });
+  const sessionToken = signEphemeralToken({
+    userId,
+    sessionId: session._id.toString(),
+    type: 'interview_session',
+  });
 
   logger.info({ sessionId: session._id, userId, role, difficulty }, 'Interview session started');
   return { sessionId: session._id.toString(), sessionToken, engineState: 'GENERATE_Q' };
@@ -104,20 +103,24 @@ export const generateNextQuestion = async (
   askedTopics: string[],
   askedQuestionIds: string[]
 ): Promise<GeneratedQuestion> => {
-  const prompt = buildQuestionGenerationPrompt({
+  const promptObj = buildQuestionGenerationPrompt({
     role,
+    level: difficulty,
     topic,
-    difficulty,
-    questionIndex,
-    askedTopics,
-    askedQuestionIds,
+    previousQuestions: askedTopics,
+    seed: `${sessionId}-${questionIndex}`,
   });
+
+  const messages: AIMessage[] = [
+    { role: 'system', content: promptObj.system },
+    { role: 'user', content: promptObj.user },
+  ];
 
   const raw = await aiAdapter.sendJSON<{
     text: string;
     type: string;
     expectedKeywords: string[];
-  }>(prompt, { temperature: 0.65, maxTokens: 600 });
+  }>(messages, { temperature: 0.65, maxTokens: 600 });
 
   const question: GeneratedQuestion = {
     id: `q-${questionIndex}-${Date.now()}`,
@@ -131,10 +134,7 @@ export const generateNextQuestion = async (
 
   await InterviewSession.updateOne(
     { _id: sessionId },
-    {
-      $push: { questions: question },
-      $set: { engineState: 'AWAIT_ANSWER' as EngineState },
-    }
+    { $push: { questions: question } }
   );
 
   await safeRedisDel(`session:${sessionId}`);
@@ -161,18 +161,23 @@ export const generateFollowUp = async (
   if (!session) return null;
 
   const parent = session.questions.find((q: any) => q.id === parentQuestionId);
-  if (!parent || (parent as any).followUpCount >= env.INTERVIEW_MAX_FOLLOWUPS_PER_QUESTION) {
+  if (!parent || (parent as any).followUpCount >= env.MAX_FOLLOWUPS_PER_QUESTION) {
     return null;
   }
 
-  const prompt = buildFollowUpPrompt({
+  const promptObj = buildFollowUpPrompt({
     originalQuestion: parentQuestionText,
     candidateAnswer,
     missingKeywords,
     weaknesses,
   });
 
-  const raw = await aiAdapter.sendJSON<{ text: string; targetKeywords: string[] }>(prompt, {
+  const messages: AIMessage[] = [
+    { role: 'system', content: promptObj.system },
+    { role: 'user', content: promptObj.user },
+  ];
+
+  const raw = await aiAdapter.sendJSON<{ text: string; targetKeywords: string[] }>(messages, {
     temperature: 0.5,
     maxTokens: 400,
   });
@@ -193,7 +198,6 @@ export const generateFollowUp = async (
     {
       $push: { questions: followUp },
       $inc: { 'questions.$.followUpCount': 1 },
-      $set: { engineState: 'AWAIT_FU_ANSWER' as EngineState },
     }
   );
 
@@ -222,15 +226,16 @@ export const processAnswer = async (
   const alreadyAnswered = session.answers.find((a: any) => a.questionId === questionId);
   if (alreadyAnswered) throw createError('Question already answered', 409, 'ALREADY_ANSWERED');
 
+  const now = new Date();
+  const start = durationMs ? new Date(now.getTime() - durationMs) : now;
+
   session.answers.push({
     questionId,
     answerText,
     answerAudioUrl,
-    startedAt: new Date(Date.now() - (durationMs ?? 0)),
-    submittedAt: new Date(),
+    timestamps: { start, end: now },
   } as any);
 
-  session.engineState = 'PROCESS_ANSWER';
   await session.save();
   await safeRedisDel(`session:${sessionId}`);
 
@@ -241,10 +246,10 @@ export const processAnswer = async (
     userId,
     questionText: (question as any).text,
     answerText,
-    topic: (question as any).topic,
+    topic: (question as any).topic ?? session.role,
     difficulty: session.difficulty as Difficulty,
     questionIndex: session.answers.length - 1,
-    totalQuestions: env.INTERVIEW_MAX_QUESTIONS,
+    totalQuestions: env.MAX_QUESTIONS_PER_SESSION,
     role: session.role,
   });
 
@@ -263,9 +268,8 @@ export const terminateSession = async (
     {
       $set: {
         status: 'terminated',
-        engineState: 'TERMINATE',
-        terminationReason: reason,
-        'proctoringData.isTerminated': true,
+        'proctoring.terminated': true,
+        'proctoring.terminationReason': reason,
       },
     },
     { new: true }
@@ -284,13 +288,7 @@ export const terminateSession = async (
 export const completeSession = async (sessionId: string, userId: string) => {
   await InterviewSession.updateOne(
     { _id: sessionId, userId },
-    {
-      $set: {
-        status: 'completed',
-        engineState: 'AGGREGATE',
-        completedAt: new Date(),
-      },
-    }
+    { $set: { status: 'completed' } }
   );
 
   await safeRedisDel(`session:${sessionId}`);
@@ -320,17 +318,16 @@ export const getSession = async (sessionId: string, userId: string) => {
 export const getSessionStatus = async (sessionId: string, userId: string) => {
   const session = await InterviewSession.findOne(
     { _id: sessionId, userId },
-    { status: 1, engineState: 1, questions: 1, answers: 1, 'proctoringData.isTerminated': 1 }
+    { status: 1, questions: 1, answers: 1, proctoring: 1 }
   ).lean();
 
   if (!session) throw createError('Session not found', 404, 'SESSION_NOT_FOUND');
 
   return {
     status: session.status,
-    engineState: session.engineState,
     questionsGenerated: session.questions?.length ?? 0,
     answersSubmitted: session.answers?.length ?? 0,
-    isTerminated: session.proctoringData?.isTerminated ?? false,
+    isTerminated: (session.proctoring as any)?.terminated ?? false,
   };
 };
 
@@ -345,19 +342,28 @@ export const recordProctoringEvent = async (
   const session = await InterviewSession.findOne({ _id: sessionId, userId, status: 'in_progress' });
   if (!session) throw createError('Active session not found', 404, 'SESSION_NOT_FOUND');
 
-  session.proctoringData.events.push({ type: eventType as any, timestamp: new Date(timestamp), details });
+  const proctoring = session.proctoring as any;
 
   if (eventType === 'tab_switch') {
-    session.proctoringData.tabSwitches += 1;
-    if (session.proctoringData.tabSwitches >= env.PROCTORING_MAX_TAB_SWITCHES) {
+    proctoring.tabSwitchCount = (proctoring.tabSwitchCount ?? 0) + 1;
+    if (proctoring.tabSwitchCount >= env.TAB_SWITCH_TERMINATE_THRESHOLD) {
+      await session.save();
       await terminateSession(sessionId, userId, 'Exceeded maximum tab switches');
       return { terminated: true };
     }
   }
 
-  if (eventType === 'face_missing') session.proctoringData.faceWarnings += 1;
+  if (eventType === 'face_missing') {
+    proctoring.cameraEvents = proctoring.cameraEvents ?? [];
+    proctoring.cameraEvents.push({
+      timestamp: new Date(timestamp),
+      eventType: 'face_absent',
+      details: details ? JSON.stringify(details) : undefined,
+    });
+  }
 
   if (eventType === 'termination') {
+    await session.save();
     await terminateSession(sessionId, userId, (details?.reason as string) ?? 'Proctoring violation');
     return { terminated: true };
   }

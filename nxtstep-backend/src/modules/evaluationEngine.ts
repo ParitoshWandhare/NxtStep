@@ -3,7 +3,8 @@
 // Per-answer scoring, follow-up decision, scorecard aggregation.
 // ============================================================
 
-import { aiAdapter } from '../ai/aiAdapter';
+import crypto from 'crypto';
+import { aiAdapter, AIMessage } from '../ai/aiAdapter';
 import { buildEvaluationPrompt } from '../ai/prompts';
 import { Evaluation } from '../models/Evaluation';
 import { Scorecard } from '../models/Scorecard';
@@ -50,6 +51,9 @@ export interface EvaluationResult {
   latencyMs: number;
 }
 
+const hashPrompt = (messages: AIMessage[]): string =>
+  crypto.createHash('sha256').update(JSON.stringify(messages)).digest('hex').slice(0, 12);
+
 // ── Evaluate a single answer ──────────────────────────────────
 export const evaluateAnswer = async (params: {
   sessionId: string;
@@ -66,7 +70,18 @@ export const evaluateAnswer = async (params: {
   const { sessionId, questionId, userId, questionText, answerText, topic, difficulty, questionIndex, totalQuestions, role } = params;
   const startTime = Date.now();
 
-  const prompt = buildEvaluationPrompt({ role, topic, difficulty, questionText, answerText, questionIndex, totalQuestions });
+  const promptObj = buildEvaluationPrompt({
+    question: questionText,
+    answer: answerText,
+    expectedKeywords: [],
+    role,
+    level: difficulty,
+  });
+
+  const messages: AIMessage[] = [
+    { role: 'system', content: promptObj.system },
+    { role: 'user', content: promptObj.user },
+  ];
 
   const raw = await aiAdapter.sendJSON<{
     scores: DimensionScores;
@@ -74,7 +89,7 @@ export const evaluateAnswer = async (params: {
     missingKeywords: string[];
     feedback: { strengths: string[]; weaknesses: string[]; improvements: string[] };
     followUp: { shouldAsk: boolean; reason: string; suggestedQuestion?: string };
-  }>(prompt, { temperature: 0.2, maxTokens: 1200 });
+  }>(messages, { temperature: 0.2, maxTokens: 1200 });
 
   const latencyMs = Date.now() - startTime;
 
@@ -87,10 +102,10 @@ export const evaluateAnswer = async (params: {
     raw.scores.conceptDepth * WEIGHTS.conceptDepth
   ).toFixed(2));
 
-  const promptHash = aiAdapter.hashPrompt(prompt);
+  const promptHash = hashPrompt(messages);
 
   // Persist
-  const evaluation = await Evaluation.create({
+  await Evaluation.create({
     sessionId,
     questionId,
     userId,
@@ -100,7 +115,7 @@ export const evaluateAnswer = async (params: {
     feedback: raw.feedback ?? { strengths: [], weaknesses: [], improvements: [] },
     followUp: raw.followUp ?? { shouldAsk: false, reason: 'Not required' },
     promptHash,
-    modelUsed: env.AI_MODEL,
+    modelUsed: env.OPENROUTER_DEFAULT_MODEL,
     evaluationLatencyMs: latencyMs,
   });
 
@@ -109,7 +124,16 @@ export const evaluateAnswer = async (params: {
 
   logger.info({ sessionId, questionId, overall, latencyMs }, 'Answer evaluated');
 
-  return { scores: raw.scores, overall, detectedKeywords: raw.detectedKeywords ?? [], missingKeywords: raw.missingKeywords ?? [], feedback: raw.feedback ?? { strengths: [], weaknesses: [], improvements: [] }, followUp: raw.followUp ?? { shouldAsk: false, reason: '' }, promptHash, latencyMs };
+  return {
+    scores: raw.scores,
+    overall,
+    detectedKeywords: raw.detectedKeywords ?? [],
+    missingKeywords: raw.missingKeywords ?? [],
+    feedback: raw.feedback ?? { strengths: [], weaknesses: [], improvements: [] },
+    followUp: raw.followUp ?? { shouldAsk: false, reason: '' },
+    promptHash,
+    latencyMs,
+  };
 };
 
 // ── Determine next engine state after evaluation ──────────────
@@ -130,10 +154,10 @@ export const decideNextState = async (
 
   const shouldFollowUp =
     evalResult.followUp.shouldAsk &&
-    followUpCount < env.INTERVIEW_MAX_FOLLOWUPS_PER_QUESTION;
+    followUpCount < env.MAX_FOLLOWUPS_PER_QUESTION;
 
   if (shouldFollowUp) return 'GENERATE_FU';
-  if (answersCount >= env.INTERVIEW_MAX_QUESTIONS) return 'TERMINATE';
+  if (answersCount >= env.MAX_QUESTIONS_PER_SESSION) return 'TERMINATE';
   return 'GENERATE_Q';
 };
 
@@ -177,7 +201,8 @@ export const aggregateScorecard = async (sessionId: string, userId: string) => {
     {
       $set: {
         userId,
-        scores: { ...avgScores, overall },
+        ...avgScores,
+        overall,
         strengths: [...strengths].slice(0, 10),
         weaknesses: [...weaknesses].slice(0, 10),
         suggestions: [...suggestions].slice(0, 10),
@@ -187,8 +212,6 @@ export const aggregateScorecard = async (sessionId: string, userId: string) => {
     { new: true, upsert: true, setDefaultsOnInsert: true }
   );
 
-  // Update session to COMPLETE
-  await InterviewSession.updateOne({ _id: sessionId }, { $set: { engineState: 'COMPLETE' } });
   await safeRedisDel(`session:${sessionId}`);
 
   emitScorecardReady(sessionId, scorecard);
@@ -210,7 +233,7 @@ export const getUserScorecards = async (userId: string, page = 1, limit = 10) =>
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate({ path: 'sessionId', select: 'role difficulty createdAt completedAt status' })
+      .populate({ path: 'sessionId', select: 'role difficulty createdAt status' })
       .lean(),
     Scorecard.countDocuments({ userId }),
   ]);

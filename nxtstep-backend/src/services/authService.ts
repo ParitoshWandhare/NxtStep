@@ -26,7 +26,7 @@ export const registerUser = async (
     rolePreferences,
   });
 
-  const token = signToken({ userId: user._id.toString(), email: user.email, name: user.name });
+  const token = signToken({ userId: user._id.toString(), email: user.email });
 
   // Fire-and-forget welcome email
   sendWelcomeEmail(user.email, user.name).catch((err) =>
@@ -34,7 +34,7 @@ export const registerUser = async (
   );
 
   logger.info({ userId: user._id }, 'User registered');
-  return { token, user: { id: user._id, name: user.name, email: user.email } };
+  return { token, user: { id: user._id.toString(), name: user.name, email: user.email } };
 };
 
 export const loginUser = async (email: string, password: string) => {
@@ -45,11 +45,14 @@ export const loginUser = async (email: string, password: string) => {
   if (!valid) throw createError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
 
   // Update login stats
-  await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date() }, $inc: { loginCount: 1 } });
+  await User.updateOne(
+    { _id: user._id },
+    { $set: { lastLoginAt: new Date() }, $inc: { loginCount: 1 } }
+  );
 
-  const token = signToken({ userId: user._id.toString(), email: user.email, name: user.name });
+  const token = signToken({ userId: user._id.toString(), email: user.email });
   logger.info({ userId: user._id }, 'User logged in');
-  return { token, user: { id: user._id, name: user.name, email: user.email } };
+  return { token, user: { id: user._id.toString(), name: user.name, email: user.email } };
 };
 
 export const forgotPassword = async (email: string) => {
@@ -64,7 +67,9 @@ export const forgotPassword = async (email: string) => {
     { _id: user._id },
     {
       passwordResetToken: hashedToken,
-      passwordResetExpires: new Date(Date.now() + env.PASSWORD_RESET_EXPIRES_HOURS * 60 * 60 * 1000),
+      passwordResetExpires: new Date(
+        Date.now() + env.PASSWORD_RESET_EXPIRES_HOURS * 60 * 60 * 1000
+      ),
     }
   );
 
@@ -91,7 +96,9 @@ export const resetPassword = async (rawToken: string, newPassword: string) => {
 };
 
 export const getProfile = async (userId: string) => {
-  const user = await User.findById(userId).select('-passwordHash -passwordResetToken -passwordResetExpires');
+  const user = await User.findById(userId).select(
+    '-passwordHash -passwordResetToken -passwordResetExpires'
+  );
   if (!user) throw createError('User not found', 404, 'USER_NOT_FOUND');
   return user;
 };
@@ -100,11 +107,10 @@ export const updateProfile = async (
   userId: string,
   updates: { name?: string; rolePreferences?: string[]; interests?: string[] }
 ) => {
-  const user = await User.findByIdAndUpdate(
-    userId,
-    { $set: updates },
-    { new: true, runValidators: true }
-  ).select('-passwordHash -passwordResetToken -passwordResetExpires');
+  const user = await User.findByIdAndUpdate(userId, { $set: updates }, {
+    new: true,
+    runValidators: true,
+  }).select('-passwordHash -passwordResetToken -passwordResetExpires');
 
   if (!user) throw createError('User not found', 404, 'USER_NOT_FOUND');
   logger.info({ userId }, 'Profile updated');

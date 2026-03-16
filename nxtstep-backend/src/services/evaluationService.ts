@@ -3,8 +3,9 @@
 // Called by the evaluate worker after answer submission.
 // ============================================================
 
-import { aiAdapter } from '../ai/aiAdapter';
-import { buildEvaluationPrompt, buildFollowUpPrompt } from '../ai/prompts';
+import crypto from 'crypto';
+import { aiAdapter, AIMessage } from '../ai/aiAdapter';
+import { buildEvaluationPrompt } from '../ai/prompts';
 import { Evaluation } from '../models/Evaluation';
 import { InterviewSession } from '../models/InterviewSession';
 import { addGenerateQuestionJob } from '../queues';
@@ -44,11 +45,20 @@ export const evaluateAnswer = async (
 ): Promise<EvalResult> => {
   const startTime = Date.now();
 
-  const prompt = buildEvaluationPrompt({
-    role, topic, difficulty, questionText, answerText, questionIndex, totalQuestions,
+  const promptObj = buildEvaluationPrompt({
+    question: questionText,
+    answer: answerText,
+    expectedKeywords: [],
+    role,
+    level: difficulty,
   });
 
-  const evalData = await aiAdapter.sendJSON<EvalResult>(prompt, {
+  const messages: AIMessage[] = [
+    { role: 'system', content: promptObj.system },
+    { role: 'user', content: promptObj.user },
+  ];
+
+  const evalData = await aiAdapter.sendJSON<EvalResult>(messages, {
     temperature: 0.2,
     maxTokens: 1200,
   });
@@ -70,6 +80,12 @@ export const evaluateAnswer = async (
     evalData.scores.confidence * w.confidence +
     evalData.scores.conceptDepth * w.conceptDepth;
 
+  const promptHash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(messages))
+    .digest('hex')
+    .slice(0, 12);
+
   // Persist evaluation
   await Evaluation.create({
     sessionId,
@@ -80,23 +96,23 @@ export const evaluateAnswer = async (
     missingKeywords: evalData.missingKeywords ?? [],
     feedback: evalData.feedback ?? { strengths: [], weaknesses: [], improvements: [] },
     followUp: evalData.followUp ?? { shouldAsk: false, reason: 'Not required' },
-    promptHash: aiAdapter.hashPrompt(prompt),
-    modelUsed: env.AI_MODEL,
+    promptHash,
+    modelUsed: env.OPENROUTER_DEFAULT_MODEL,
     evaluationLatencyMs: latencyMs,
   });
 
-  // Update session engineState
+  // Update session state
   const session = await InterviewSession.findById(sessionId);
   if (session) {
     const question = session.questions.find((q) => q.id === questionId);
-    const followUpCount = question?.followUpCount ?? 0;
+    const followUpCount = (question as any)?.followUpCount ?? 0;
     const answersCount = session.answers.length;
     const shouldAskFollowUp =
-      evalData.followUp?.shouldAsk &&
-      followUpCount < env.INTERVIEW_MAX_FOLLOWUPS_PER_QUESTION;
+      evalData.followUp?.shouldAsk === true &&
+      followUpCount < env.MAX_FOLLOWUPS_PER_QUESTION;
 
     if (shouldAskFollowUp && evalData.followUp.suggestedQuestion) {
-      // Generate follow-up inline (fast path: AI already suggested it)
+      // Fast-path: AI already suggested a follow-up question text
       const fuQuestion = {
         id: `fu-${questionId}-${followUpCount + 1}`,
         text: evalData.followUp.suggestedQuestion,
@@ -108,23 +124,19 @@ export const evaluateAnswer = async (
         parentQuestionId: questionId,
       };
       session.questions.push(fuQuestion as any);
-      session.engineState = 'AWAIT_FU_ANSWER';
       if (question) (question as any).followUpCount = followUpCount + 1;
-    } else if (answersCount >= env.INTERVIEW_MAX_QUESTIONS) {
-      session.engineState = 'TERMINATE';
+    } else if (answersCount >= env.MAX_QUESTIONS_PER_SESSION) {
       session.status = 'completed';
-      session.completedAt = new Date();
     } else {
-      session.engineState = 'GENERATE_Q';
       // Enqueue next question
-      const askedTopics = session.questions.map((q) => q.topic);
+      const askedTopics = session.questions.map((q) => (q as any).topic ?? '');
       const askedQuestionIds = session.questions.map((q) => q.id);
       await addGenerateQuestionJob({
         sessionId,
         userId,
         role: session.role,
-        topic: session.customTopics?.[answersCount] ?? role,
-        difficulty: session.difficulty as any,
+        topic: askedTopics[answersCount] ?? role,
+        difficulty: session.difficulty as 'junior' | 'mid' | 'senior',
         questionIndex: answersCount,
         askedTopics,
         askedQuestionIds,
