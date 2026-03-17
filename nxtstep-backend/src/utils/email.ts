@@ -1,6 +1,6 @@
 // ============================================================
-// NxtStep — Email Utility
-// Nodemailer with graceful fallback to console logging in dev.
+// NxtStep — Email Utility (FIXED)
+// Added sendOtpEmail for email verification
 // ============================================================
 
 import nodemailer, { Transporter } from 'nodemailer';
@@ -49,6 +49,27 @@ export const sendEmail = async (options: EmailOptions): Promise<boolean> => {
     logger.error({ err, to: options.to }, 'Failed to send email');
     return false;
   }
+};
+
+// ── NEW: Send OTP for email verification ─────────────────────
+export const sendOtpEmail = async (to: string, name: string, otp: string): Promise<boolean> => {
+  return sendEmail({
+    to,
+    subject: 'NxtStep — Verify your email address',
+    text: `Hi ${name},\n\nYour verification code is: ${otp}\n\nThis code expires in 10 minutes.\n\nIf you did not sign up, ignore this email.`,
+    html: `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#f4f7ff;padding:40px 20px;margin:0">
+<div style="max-width:500px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 20px rgba(0,0,0,.08)">
+  <h1 style="color:#6366f1;margin-bottom:4px">NxtStep</h1>
+  <h2 style="color:#1e293b;margin-top:0">Verify your email</h2>
+  <p style="color:#475569;line-height:1.6">Hi <strong>${name}</strong>, use the code below to verify your email address. It expires in <strong>10 minutes</strong>.</p>
+  <div style="text-align:center;margin:32px 0">
+    <div style="display:inline-block;background:#f1f5f9;border:2px dashed #6366f1;border-radius:12px;padding:20px 40px">
+      <span style="font-size:36px;font-weight:700;letter-spacing:10px;color:#6366f1">${otp}</span>
+    </div>
+  </div>
+  <p style="color:#94a3b8;font-size:13px;text-align:center">If you didn't create a NxtStep account, you can safely ignore this email.</p>
+</div></body></html>`,
+  });
 };
 
 export const sendPasswordResetEmail = async (to: string, resetToken: string): Promise<boolean> => {

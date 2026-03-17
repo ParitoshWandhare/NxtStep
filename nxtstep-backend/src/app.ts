@@ -10,6 +10,7 @@ import morgan from 'morgan';
 import { env } from './config/env';
 import { apiLimiter } from './middleware/rateLimiter';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
+import { parseBodyIfNeeded } from './middleware/validate';
 import {
   authRouter,
   interviewRouter,
@@ -46,12 +47,12 @@ if (env.NODE_ENV !== 'test') {
 app.use('/api/', apiLimiter);
 
 // ── Routes ────────────────────────────────────────────────────
-app.use('/api/auth', authRouter);
+app.use('/api/auth',      authRouter);
 app.use('/api/interview', interviewRouter);
-app.use('/api/scores', scoresRouter);
+app.use('/api/scores',    scoresRouter);
 app.use('/api/recommend', recommendationsRouter);
-app.use('/api/news', newsRouter);
-app.use('/api/health', healthRouter);
+app.use('/api/news',      newsRouter);
+app.use('/api/health',    healthRouter);
 
 // ── 404 & Error handlers ─────────────────────────────────────
 app.use(notFoundHandler);

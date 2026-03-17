@@ -1,5 +1,5 @@
 // ============================================================
-// NxtStep — Validation Middleware (Zod)
+// NxtStep — Validation Middleware (FIXED)
 // ============================================================
 
 import { Request, Response, NextFunction } from 'express';
@@ -26,7 +26,58 @@ export const validate =
     next();
   };
 
-// ── Schemas ─────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Content-Type resilience middleware
+//
+// Handles three cases where express.json() won't parse the body:
+//
+//  Case 1 — Content-Type: text/plain, body is a raw JSON string
+//           req.body === '{"name":"Paritosh"}'
+//
+//  Case 2 — Content-Type omitted entirely, express leaves body
+//           as a Buffer or raw string
+//
+//  Case 3 — Content-Type: application/x-www-form-urlencoded but
+//           the actual payload is JSON (Postman "Text" mode sends
+//           this as text/plain which express.urlencoded ignores,
+//           leaving req.body as the raw string)
+//
+// In all cases: if req.body looks like a JSON object/array string,
+// parse it. Otherwise leave it alone so Zod reports the real error.
+// ─────────────────────────────────────────────────────────────
+export const parseBodyIfNeeded = (
+  req: Request,
+  _res: Response,
+  next: NextFunction
+): void => {
+  const body = req.body;
+
+  // Already parsed by express.json() — nothing to do
+  if (body !== null && typeof body === 'object' && !Buffer.isBuffer(body)) {
+    return next();
+  }
+
+  // Convert Buffer to string first
+  const raw: string = Buffer.isBuffer(body)
+    ? body.toString('utf8')
+    : typeof body === 'string'
+    ? body
+    : '';
+
+  const trimmed = raw.trim();
+
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      req.body = JSON.parse(trimmed);
+    } catch {
+      // Leave as-is; Zod validation will surface the error clearly
+    }
+  }
+
+  next();
+};
+
+// ── Schemas ──────────────────────────────────────────────────
 import { z } from 'zod';
 
 export const registerSchema = z.object({
@@ -56,6 +107,13 @@ export const resetPasswordSchema = z.object({
     .min(8, 'Password must be at least 8 chars')
     .regex(/[A-Z]/, 'Must contain uppercase')
     .regex(/[0-9]/, 'Must contain number'),
+});
+
+export const verifyEmailSchema = z.object({
+  otp: z
+    .string()
+    .length(6, 'OTP must be exactly 6 digits')
+    .regex(/^\d{6}$/, 'OTP must contain only digits'),
 });
 
 export const startInterviewSchema = z.object({

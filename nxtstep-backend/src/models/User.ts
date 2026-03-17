@@ -1,5 +1,6 @@
 // ============================================================
-// NxtStep — User Model
+// NxtStep — User Model (FIXED)
+// Added emailVerificationOtp, emailVerificationExpires fields
 // ============================================================
 
 import mongoose, { Document, Schema } from 'mongoose';
@@ -16,6 +17,10 @@ export interface IUser extends Document {
   resumeText?: string;
   interests: string[];
   isEmailVerified: boolean;
+  // ── NEW: OTP fields ──────────────────────────────────────
+  emailVerificationOtp?: string;        // hashed 6-digit OTP
+  emailVerificationExpires?: Date;      // 10-minute expiry
+  // ────────────────────────────────────────────────────────
   passwordResetToken?: string;
   passwordResetExpires?: Date;
   lastLoginAt?: Date;
@@ -28,13 +33,23 @@ export interface IUser extends Document {
 const userSchema = new Schema<IUser>(
   {
     name: { type: String, required: [true, 'Name is required'], trim: true, minlength: 2, maxlength: 100 },
-    email: { type: String, required: [true, 'Email is required'], lowercase: true, trim: true, match: [/^\S+@\S+\.\S+$/, 'Invalid email'] },
+    email: {
+      type: String,
+      required: [true, 'Email is required'],
+      lowercase: true,
+      trim: true,
+      match: [/^\S+@\S+\.\S+$/, 'Invalid email'],
+    },
     passwordHash: { type: String, required: true, select: false },
     rolePreferences: { type: [String], default: [] },
     resumeUrl: { type: String },
     resumeText: { type: String, maxlength: 15000 },
     interests: { type: [String], default: [] },
     isEmailVerified: { type: Boolean, default: false },
+    // ── NEW ──────────────────────────────────────────────
+    emailVerificationOtp: { type: String, select: false },
+    emailVerificationExpires: { type: Date, select: false },
+    // ─────────────────────────────────────────────────────
     passwordResetToken: { type: String, select: false },
     passwordResetExpires: { type: Date, select: false },
     lastLoginAt: { type: Date },
@@ -50,6 +65,8 @@ const userSchema = new Schema<IUser>(
         delete ret.passwordHash;
         delete ret.passwordResetToken;
         delete ret.passwordResetExpires;
+        delete ret.emailVerificationOtp;
+        delete ret.emailVerificationExpires;
         return ret;
       },
     },
@@ -74,6 +91,7 @@ userSchema.methods.comparePassword = async function (password: string): Promise<
 
 userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ passwordResetToken: 1 }, { sparse: true });
+userSchema.index({ emailVerificationOtp: 1 }, { sparse: true });
 userSchema.index({ createdAt: -1 });
 
 export const User = mongoose.model<IUser>('User', userSchema);
