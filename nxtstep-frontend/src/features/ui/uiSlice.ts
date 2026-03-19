@@ -1,109 +1,73 @@
 // ============================================================
-// NxtStep — Interview Slice
+// NxtStep — UI Slice
+// Theme, sidebar, responsive state
 // ============================================================
 
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
-import type { Question, EvaluationResult, InterviewReduxState } from '@/types';
+import type { Theme, UIReduxState } from '@/types';
 
-const initialState: InterviewReduxState = {
-  sessionId: null,
-  sessionToken: null,
-  currentQuestion: null,
-  pendingAnswer: '',
-  isAnswering: false,
-  isWaitingForQuestion: false,
-  evaluationResults: {},
-  proctoringWarnings: 0,
-  isSessionActive: false,
-  engineState: 'IDLE',
+const THEME_KEY = 'nxtstep-theme';
+
+function getInitialTheme(): Theme {
+  const stored = localStorage.getItem(THEME_KEY) as Theme | null;
+  if (stored === 'light' || stored === 'dark') return stored;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function applyTheme(theme: Theme) {
+  if (theme === 'dark') {
+    document.documentElement.classList.add('dark');
+  } else {
+    document.documentElement.classList.remove('dark');
+  }
+  localStorage.setItem(THEME_KEY, theme);
+}
+
+// Apply theme immediately to avoid flash-of-unstyled-content
+const initialTheme = getInitialTheme();
+applyTheme(initialTheme);
+
+const initialState: UIReduxState = {
+  theme: initialTheme,
+  sidebarOpen: false,
+  isMobile: window.innerWidth < 768,
 };
 
-const interviewSlice = createSlice({
-  name: 'interview',
+const uiSlice = createSlice({
+  name: 'ui',
   initialState,
   reducers: {
-    startSession(
-      state,
-      action: PayloadAction<{ sessionId: string; sessionToken: string }>
-    ) {
-      state.sessionId = action.payload.sessionId;
-      state.sessionToken = action.payload.sessionToken;
-      state.isSessionActive = true;
-      state.isWaitingForQuestion = true;
-      state.engineState = 'GENERATE_Q';
-      state.proctoringWarnings = 0;
-      state.evaluationResults = {};
-      state.currentQuestion = null;
-      state.pendingAnswer = '';
+    setTheme(state, action: PayloadAction<Theme>) {
+      state.theme = action.payload;
+      applyTheme(action.payload);
     },
 
-    setCurrentQuestion(state, action: PayloadAction<Question>) {
-      state.currentQuestion = action.payload;
-      state.isWaitingForQuestion = false;
-      state.isAnswering = false;
-      state.pendingAnswer = '';
-      state.engineState = 'AWAIT_ANSWER';
+    toggleTheme(state) {
+      const next: Theme = state.theme === 'dark' ? 'light' : 'dark';
+      state.theme = next;
+      applyTheme(next);
     },
 
-    setIsAnswering(state, action: PayloadAction<boolean>) {
-      state.isAnswering = action.payload;
+    setSidebarOpen(state, action: PayloadAction<boolean>) {
+      state.sidebarOpen = action.payload;
     },
 
-    setPendingAnswer(state, action: PayloadAction<string>) {
-      state.pendingAnswer = action.payload;
+    toggleSidebar(state) {
+      state.sidebarOpen = !state.sidebarOpen;
     },
 
-    setWaitingForQuestion(state, action: PayloadAction<boolean>) {
-      state.isWaitingForQuestion = action.payload;
-    },
-
-    addEvaluationResult(state, action: PayloadAction<EvaluationResult>) {
-      state.evaluationResults[action.payload.questionId] = action.payload;
-    },
-
-    incrementProctoringWarning(state) {
-      state.proctoringWarnings += 1;
-    },
-
-    setEngineState(state, action: PayloadAction<string>) {
-      state.engineState = action.payload;
-    },
-
-    endSession(state) {
-      state.isSessionActive = false;
-      state.isWaitingForQuestion = false;
-      state.isAnswering = false;
-      state.engineState = 'COMPLETE';
-    },
-
-    resetInterview() {
-      return initialState;
+    setIsMobile(state, action: PayloadAction<boolean>) {
+      state.isMobile = action.payload;
     },
   },
 });
 
-export const {
-  startSession,
-  setCurrentQuestion,
-  setIsAnswering,
-  setPendingAnswer,
-  setWaitingForQuestion,
-  addEvaluationResult,
-  incrementProctoringWarning,
-  setEngineState,
-  endSession,
-  resetInterview,
-} = interviewSlice.actions;
+export const { setTheme, toggleTheme, setSidebarOpen, toggleSidebar, setIsMobile } =
+  uiSlice.actions;
 
-export default interviewSlice.reducer;
+export default uiSlice.reducer;
 
-// Selectors
-export const selectSessionId = (s: { interview: InterviewReduxState }) => s.interview.sessionId;
-export const selectCurrentQuestion = (s: { interview: InterviewReduxState }) => s.interview.currentQuestion;
-export const selectIsWaiting = (s: { interview: InterviewReduxState }) => s.interview.isWaitingForQuestion;
-export const selectIsAnswering = (s: { interview: InterviewReduxState }) => s.interview.isAnswering;
-export const selectPendingAnswer = (s: { interview: InterviewReduxState }) => s.interview.pendingAnswer;
-export const selectEvaluations = (s: { interview: InterviewReduxState }) => s.interview.evaluationResults;
-export const selectProctoringWarnings = (s: { interview: InterviewReduxState }) => s.interview.proctoringWarnings;
-export const selectIsSessionActive = (s: { interview: InterviewReduxState }) => s.interview.isSessionActive;
-export const selectEngineState = (s: { interview: InterviewReduxState }) => s.interview.engineState;
+// ── Selectors ─────────────────────────────────────────────────
+export const selectTheme = (s: { ui: UIReduxState }) => s.ui.theme;
+export const selectSidebarOpen = (s: { ui: UIReduxState }) => s.ui.sidebarOpen;
+export const selectIsMobile = (s: { ui: UIReduxState }) => s.ui.isMobile;

@@ -13,7 +13,6 @@ import { selectSidebarOpen, setSidebarOpen } from '@/features/ui/uiSlice';
 import { useLogout } from '@/hooks/useApi';
 import { useResponsive } from '@/hooks';
 import { selectCurrentUser } from '@/features/auth/authSlice';
-import Button from '../ui/Button';
 
 const NAV_ITEMS = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },

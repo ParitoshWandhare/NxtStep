@@ -2,7 +2,7 @@
 // NxtStep — Top Navigation Header
 // ============================================================
 
-import { Menu, Sun, Moon, Bell } from 'lucide-react';
+import { Menu, Sun, Moon } from 'lucide-react';
 import { useAppDispatch } from '@/app/hooks';
 import { toggleSidebar } from '@/features/ui/uiSlice';
 import { useTheme, useResponsive } from '@/hooks';
@@ -19,7 +19,7 @@ export default function TopNav({ title }: TopNavProps) {
 
   return (
     <header className="sticky top-0 z-30 flex items-center gap-3 px-4 sm:px-6 h-14 bg-[var(--color-bg)]/80 backdrop-blur-md border-b border-[var(--color-border)]">
-       {/* Menu toggle — mobile only  */}
+      {/* Menu toggle — mobile only */}
       {isMobile && (
         <button
           onClick={() => dispatch(toggleSidebar())}
