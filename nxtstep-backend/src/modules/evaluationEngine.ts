@@ -1,6 +1,8 @@
 // ============================================================
 // NxtStep — Evaluation Engine Module
-// Per-answer scoring, follow-up decision, scorecard aggregation.
+// BUG FIX: Evaluation.create() was missing `answerText`.
+// The field is required by Mongoose schema but was not being
+// forwarded from the function params into the create() call.
 // ============================================================
 
 import crypto from 'crypto';
@@ -15,13 +17,12 @@ import { logger } from '../utils/logger';
 import { createError } from '../middleware/errorHandler';
 import { env } from '../config/env';
 
-// ── Score weights from env ────────────────────────────────────
 const WEIGHTS = {
-  technical: env.SCORE_WEIGHT_TECHNICAL,
+  technical:     env.SCORE_WEIGHT_TECHNICAL,
   problemSolving: env.SCORE_WEIGHT_PROBLEM_SOLVING,
   communication: env.SCORE_WEIGHT_COMMUNICATION,
-  confidence: env.SCORE_WEIGHT_CONFIDENCE,
-  conceptDepth: env.SCORE_WEIGHT_CONCEPT_DEPTH,
+  confidence:    env.SCORE_WEIGHT_CONFIDENCE,
+  conceptDepth:  env.SCORE_WEIGHT_CONCEPT_DEPTH,
 };
 
 export interface DimensionScores {
@@ -67,7 +68,11 @@ export const evaluateAnswer = async (params: {
   totalQuestions: number;
   role: string;
 }): Promise<EvaluationResult> => {
-  const { sessionId, questionId, userId, questionText, answerText, topic, difficulty, questionIndex, totalQuestions, role } = params;
+  const {
+    sessionId, questionId, userId,
+    questionText, answerText,      // ← answerText was passed in but not saved
+    topic, difficulty, questionIndex, totalQuestions, role,
+  } = params;
   const startTime = Date.now();
 
   const promptObj = buildEvaluationPrompt({
@@ -95,23 +100,23 @@ export const evaluateAnswer = async (params: {
 
   // Weighted overall score
   const overall = parseFloat((
-    raw.scores.technical * WEIGHTS.technical +
+    raw.scores.technical    * WEIGHTS.technical +
     raw.scores.problemSolving * WEIGHTS.problemSolving +
-    raw.scores.communication * WEIGHTS.communication +
-    raw.scores.confidence * WEIGHTS.confidence +
-    raw.scores.conceptDepth * WEIGHTS.conceptDepth
+    raw.scores.communication  * WEIGHTS.communication +
+    raw.scores.confidence    * WEIGHTS.confidence +
+    raw.scores.conceptDepth  * WEIGHTS.conceptDepth
   ).toFixed(2));
 
   const promptHash = hashPrompt(messages);
 
-  // Persist
+  // ── FIX: include `answerText` in the create payload ──────────
   await Evaluation.create({
     sessionId,
     questionId,
-    userId,
+    answerText,                             // ← was missing before
     scores: raw.scores,
     detectedKeywords: raw.detectedKeywords ?? [],
-    missingKeywords: raw.missingKeywords ?? [],
+    missingKeywords:  raw.missingKeywords  ?? [],
     feedback: raw.feedback ?? { strengths: [], weaknesses: [], improvements: [] },
     followUp: raw.followUp ?? { shouldAsk: false, reason: 'Not required' },
     promptHash,
@@ -120,15 +125,20 @@ export const evaluateAnswer = async (params: {
   });
 
   // Notify frontend
-  emitEvaluationComplete(sessionId, { questionId, scores: raw.scores, overall, feedback: raw.feedback });
+  emitEvaluationComplete(sessionId, {
+    questionId,
+    scores: raw.scores,
+    overall,
+    feedback: raw.feedback,
+  });
 
   logger.info({ sessionId, questionId, overall, latencyMs }, 'Answer evaluated');
 
   return {
-    scores: raw.scores,
+    scores:          raw.scores,
     overall,
     detectedKeywords: raw.detectedKeywords ?? [],
-    missingKeywords: raw.missingKeywords ?? [],
+    missingKeywords:  raw.missingKeywords  ?? [],
     feedback: raw.feedback ?? { strengths: [], weaknesses: [], improvements: [] },
     followUp: raw.followUp ?? { shouldAsk: false, reason: '' },
     promptHash,
@@ -148,9 +158,9 @@ export const decideNextState = async (
 
   if (!session) throw createError('Session not found', 404, 'SESSION_NOT_FOUND');
 
-  const question = session.questions.find((q: any) => q.id === questionId);
+  const question      = session.questions.find((q: any) => q.id === questionId);
   const followUpCount = (question as any)?.followUpCount ?? 0;
-  const answersCount = session.answers.length;
+  const answersCount  = session.answers.length;
 
   const shouldFollowUp =
     evalResult.followUp.shouldAsk &&
@@ -167,7 +177,8 @@ export const aggregateScorecard = async (sessionId: string, userId: string) => {
   if (!session) throw createError('Session not found', 404, 'SESSION_NOT_FOUND');
 
   const evaluations = await Evaluation.find({ sessionId }).lean();
-  if (evaluations.length === 0) throw createError('No evaluations found', 404, 'NO_EVALUATIONS');
+  if (evaluations.length === 0)
+    throw createError('No evaluations found', 404, 'NO_EVALUATIONS');
 
   const dims = ['technical', 'problemSolving', 'communication', 'confidence', 'conceptDepth'] as const;
   const totals: Record<string, number> = {};
@@ -186,13 +197,13 @@ export const aggregateScorecard = async (sessionId: string, userId: string) => {
   }
   overall = parseFloat(overall.toFixed(2));
 
-  const strengths = new Set<string>();
+  const strengths  = new Set<string>();
   const weaknesses = new Set<string>();
   const suggestions = new Set<string>();
 
   for (const ev of evaluations) {
-    (ev.feedback as any)?.strengths?.forEach((s: string) => strengths.add(s));
-    (ev.feedback as any)?.weaknesses?.forEach((w: string) => weaknesses.add(w));
+    (ev.feedback as any)?.strengths?.forEach((s: string)    => strengths.add(s));
+    (ev.feedback as any)?.weaknesses?.forEach((w: string)   => weaknesses.add(w));
     (ev.feedback as any)?.improvements?.forEach((i: string) => suggestions.add(i));
   }
 
@@ -203,9 +214,9 @@ export const aggregateScorecard = async (sessionId: string, userId: string) => {
         userId,
         ...avgScores,
         overall,
-        strengths: [...strengths].slice(0, 10),
+        strengths:  [...strengths].slice(0, 10),
         weaknesses: [...weaknesses].slice(0, 10),
-        suggestions: [...suggestions].slice(0, 10),
+        suggestions:[...suggestions].slice(0, 10),
         questionsEvaluated: n,
       },
     },

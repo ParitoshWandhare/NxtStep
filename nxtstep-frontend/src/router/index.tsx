@@ -1,44 +1,38 @@
 // ============================================================
 // NxtStep — Router
+// FIX: Removed RequireVerified gate — users go straight to dashboard after login/register.
+//      verify-email is accessible when logged in but NOT enforced.
 // ============================================================
 
 import { lazy, Suspense } from 'react';
 import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom';
 import { useAppSelector } from '@/app/hooks';
-import { selectIsAuthenticated, selectCurrentUser } from '@/features/auth/authSlice';
+import { selectIsAuthenticated } from '@/features/auth/authSlice';
 import AppLayout from '@/components/layout/AppLayout';
 import AuthLayout from '@/components/layout/AuthLayout';
 import PageLoader from '@/components/ui/PageLoader';
 
 // ── Lazy Pages ────────────────────────────────────────────────
-const LandingPage = lazy(() => import('@/pages/LandingPage'));
-const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
-const RegisterPage = lazy(() => import('@/pages/auth/RegisterPage'));
-const VerifyEmailPage = lazy(() => import('@/pages/auth/VerifyEmailPage'));
-const ForgotPasswordPage = lazy(() => import('@/pages/auth/ForgotPasswordPage'));
-const ResetPasswordPage = lazy(() => import('@/pages/auth/ResetPasswordPage'));
-const DashboardPage = lazy(() => import('@/pages/DashboardPage'));
-const NewInterviewPage = lazy(() => import('@/pages/interview/NewInterviewPage'));
+const LandingPage         = lazy(() => import('@/pages/LandingPage'));
+const LoginPage           = lazy(() => import('@/pages/auth/LoginPage'));
+const RegisterPage        = lazy(() => import('@/pages/auth/RegisterPage'));
+const VerifyEmailPage     = lazy(() => import('@/pages/auth/VerifyEmailPage'));
+const ForgotPasswordPage  = lazy(() => import('@/pages/auth/ForgotPasswordPage'));
+const ResetPasswordPage   = lazy(() => import('@/pages/auth/ResetPasswordPage'));
+const DashboardPage       = lazy(() => import('@/pages/DashboardPage'));
+const NewInterviewPage    = lazy(() => import('@/pages/interview/NewInterviewPage'));
 const InterviewSessionPage = lazy(() => import('@/pages/interview/InterviewSessionPage'));
 const InterviewResultsPage = lazy(() => import('@/pages/interview/InterviewResultsPage'));
-const ScorecardsPage = lazy(() => import('@/pages/ScorecardsPage'));
+const ScorecardsPage      = lazy(() => import('@/pages/ScorecardsPage'));
 const ScorecardDetailPage = lazy(() => import('@/pages/ScorecardDetailPage'));
-const NewsPage = lazy(() => import('@/pages/NewsPage'));
-const ProfilePage = lazy(() => import('@/pages/ProfilePage'));
-const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
+const NewsPage            = lazy(() => import('@/pages/NewsPage'));
+const ProfilePage         = lazy(() => import('@/pages/ProfilePage'));
+const NotFoundPage        = lazy(() => import('@/pages/NotFoundPage'));
 
 // ── Guards ────────────────────────────────────────────────────
 function RequireAuth() {
   const isAuthenticated = useAppSelector(selectIsAuthenticated);
   if (!isAuthenticated) return <Navigate to="/login" replace />;
-  return <Outlet />;
-}
-
-function RequireVerified() {
-  const user = useAppSelector(selectCurrentUser);
-  const isAuthenticated = useAppSelector(selectIsAuthenticated);
-  if (!isAuthenticated) return <Navigate to="/login" replace />;
-  if (user && !user.isEmailVerified) return <Navigate to="/verify-email" replace />;
   return <Outlet />;
 }
 
@@ -101,7 +95,7 @@ export const router = createBrowserRouter([
     ],
   },
 
-  // Auth required (not necessarily verified)
+  // Auth required — verify-email accessible but not enforced
   {
     element: <RequireAuth />,
     children: [
@@ -136,9 +130,9 @@ export const router = createBrowserRouter([
     ],
   },
 
-  // Protected + verified app routes
+  // Protected app routes (auth required, NO email verification gate)
   {
-    element: <RequireVerified />,
+    element: <RequireAuth />,
     children: [
       {
         element: <AppLayout />,

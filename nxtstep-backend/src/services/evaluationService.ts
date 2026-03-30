@@ -1,6 +1,9 @@
 // ============================================================
 // NxtStep — Evaluation Service
-// Called by the evaluate worker after answer submission.
+// BUG FIX: Evaluation.create() was missing `answerText` field,
+// causing Mongoose ValidationError: "answerText is required".
+// The answerText is passed in as a parameter — it just wasn't
+// being forwarded into the create() call.
 // ============================================================
 
 import crypto from 'crypto';
@@ -36,7 +39,7 @@ export const evaluateAnswer = async (
   questionId: string,
   userId: string,
   questionText: string,
-  answerText: string,
+  answerText: string,        // ← was already a param, just not forwarded to create()
   topic: string,
   difficulty: 'junior' | 'mid' | 'senior',
   questionIndex: number,
@@ -67,18 +70,18 @@ export const evaluateAnswer = async (
 
   // Compute weighted overall
   const w = {
-    technical: env.SCORE_WEIGHT_TECHNICAL,
+    technical:    env.SCORE_WEIGHT_TECHNICAL,
     problemSolving: env.SCORE_WEIGHT_PROBLEM_SOLVING,
     communication: env.SCORE_WEIGHT_COMMUNICATION,
-    confidence: env.SCORE_WEIGHT_CONFIDENCE,
+    confidence:   env.SCORE_WEIGHT_CONFIDENCE,
     conceptDepth: env.SCORE_WEIGHT_CONCEPT_DEPTH,
   };
   const overall =
-    evalData.scores.technical * w.technical +
+    evalData.scores.technical    * w.technical +
     evalData.scores.problemSolving * w.problemSolving +
-    evalData.scores.communication * w.communication +
-    evalData.scores.confidence * w.confidence +
-    evalData.scores.conceptDepth * w.conceptDepth;
+    evalData.scores.communication  * w.communication +
+    evalData.scores.confidence    * w.confidence +
+    evalData.scores.conceptDepth  * w.conceptDepth;
 
   const promptHash = crypto
     .createHash('sha256')
@@ -86,14 +89,14 @@ export const evaluateAnswer = async (
     .digest('hex')
     .slice(0, 12);
 
-  // Persist evaluation
+  // ── FIX: include `answerText` in the create payload ──────────
   await Evaluation.create({
     sessionId,
     questionId,
-    userId,
+    answerText,                            // ← was missing before
     scores: evalData.scores,
     detectedKeywords: evalData.detectedKeywords ?? [],
-    missingKeywords: evalData.missingKeywords ?? [],
+    missingKeywords:  evalData.missingKeywords  ?? [],
     feedback: evalData.feedback ?? { strengths: [], weaknesses: [], improvements: [] },
     followUp: evalData.followUp ?? { shouldAsk: false, reason: 'Not required' },
     promptHash,
@@ -104,9 +107,10 @@ export const evaluateAnswer = async (
   // Update session state
   const session = await InterviewSession.findById(sessionId);
   if (session) {
-    const question = session.questions.find((q) => q.id === questionId);
+    const question      = session.questions.find((q) => q.id === questionId);
     const followUpCount = (question as any)?.followUpCount ?? 0;
-    const answersCount = session.answers.length;
+    const answersCount  = session.answers.length;
+
     const shouldAskFollowUp =
       evalData.followUp?.shouldAsk === true &&
       followUpCount < env.MAX_FOLLOWUPS_PER_QUESTION;
@@ -129,8 +133,8 @@ export const evaluateAnswer = async (
       session.status = 'completed';
     } else {
       // Enqueue next question
-      const askedTopics = session.questions.map((q) => (q as any).topic ?? '');
-      const askedQuestionIds = session.questions.map((q) => q.id);
+      const askedTopics       = session.questions.map((q) => (q as any).topic ?? '');
+      const askedQuestionIds  = session.questions.map((q) => q.id);
       await addGenerateQuestionJob({
         sessionId,
         userId,
@@ -147,6 +151,9 @@ export const evaluateAnswer = async (
     await safeRedisDel(`session:${sessionId}`);
   }
 
-  logger.info({ sessionId, questionId, overall: overall.toFixed(2), latencyMs }, 'Answer evaluated');
+  logger.info(
+    { sessionId, questionId, overall: overall.toFixed(2), latencyMs },
+    'Answer evaluated'
+  );
   return { ...evalData, overall };
 };
