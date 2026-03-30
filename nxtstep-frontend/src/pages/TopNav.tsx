@@ -1,5 +1,6 @@
 // ============================================================
-// NxtStep — Top Navigation Header (Global)
+// NxtStep — Top Navigation Header (Global — always visible)
+// Shows on ALL authenticated pages via AppLayout
 // ============================================================
 
 import { Menu, Sun, Moon, Zap, LayoutDashboard, BarChart3, Newspaper, User, LogOut } from 'lucide-react';
@@ -15,12 +16,19 @@ interface TopNavProps {
   title?: string;
 }
 
-const NAV_ITEMS = [
+const APP_NAV_ITEMS = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/interview/new', icon: Zap, label: 'Interview' },
   { to: '/scores', icon: BarChart3, label: 'Scores' },
   { to: '/news', icon: Newspaper, label: 'News' },
   { to: '/profile', icon: User, label: 'Profile' },
+];
+
+// Public nav links always shown
+const PUBLIC_NAV_LINKS = [
+  { to: '/', label: 'Home' },
+  { to: '/about', label: 'About' },
+  { to: '/contact', label: 'Contact' },
 ];
 
 export default function TopNav({ title }: TopNavProps) {
@@ -49,35 +57,58 @@ export default function TopNav({ title }: TopNavProps) {
         </button>
       )}
 
-      {/* ── Logo (always visible) ─────────────────────────── */}
+      {/* ── Logo ─────────────────────────────────────────── */}
       <Link to="/dashboard" className="flex items-center gap-2 group shrink-0">
         <div className="w-7 h-7 rounded-lg bg-primary-500 flex items-center justify-center shadow-glow-sm group-hover:shadow-glow transition-all duration-300 group-hover:scale-110">
           <span className="text-white font-display font-bold text-xs">N</span>
         </div>
         {!isMobile && (
-          <span className="font-display font-bold text-sm text-[var(--color-text-primary)] group-hover:text-primary-500 transition-colors duration-200">
+          <span className="font-display font-bold text-sm text-[var(--color-text-primary)] group-hover:text-primary-600 transition-colors duration-200">
             NxtStep
           </span>
         )}
       </Link>
 
-      {/* ── Desktop nav links ─────────────────────────────── */}
+      {/* ── Desktop nav: Public links + App links ─────────── */}
       {!isMobile && (
         <nav className="flex items-center gap-0.5 ml-2">
-          {NAV_ITEMS.map(({ to, icon: Icon, label }) => (
+          {/* Public links (Home, About, Contact) */}
+          {PUBLIC_NAV_LINKS.map(({ to, label }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === '/'}
+              className={({ isActive }) =>
+                cn(
+                  'px-3 py-1.5 rounded-lg text-sm font-semibold transition-all duration-200',
+                  isActive
+                    ? 'bg-primary-500/10 text-primary-600 dark:text-primary-400'
+                    : 'text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-secondary)]'
+                )
+              }
+            >
+              {label}
+            </NavLink>
+          ))}
+
+          {/* Separator */}
+          <div className="w-px h-4 bg-[var(--color-border)] mx-1" />
+
+          {/* App links */}
+          {APP_NAV_ITEMS.map(({ to, icon: Icon, label }) => (
             <NavLink
               key={to}
               to={to}
               className={({ isActive }) =>
                 cn(
-                  'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200',
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all duration-200',
                   isActive
-                    ? 'bg-primary-500/10 text-primary-500'
+                    ? 'bg-primary-500/10 text-primary-600 dark:text-primary-400'
                     : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)]'
                 )
               }
             >
-              <Icon size={15} />
+              <Icon size={14} />
               {label}
             </NavLink>
           ))}
@@ -86,7 +117,7 @@ export default function TopNav({ title }: TopNavProps) {
 
       {/* ── Page title on mobile ──────────────────────────── */}
       {isMobile && title && (
-        <h1 className="font-display font-semibold text-sm text-[var(--color-text-primary)] flex-1 truncate">
+        <h1 className="font-display font-bold text-sm text-[var(--color-text-primary)] flex-1 truncate">
           {title}
         </h1>
       )}
@@ -95,7 +126,7 @@ export default function TopNav({ title }: TopNavProps) {
         {/* ── Theme toggle ──────────────────────────────────── */}
         <button
           onClick={toggle}
-          className="p-2 rounded-xl transition-all duration-200 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-elevated)]"
+          className="p-2 rounded-xl transition-all duration-200 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-elevated)] hover:scale-110"
           aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
         >
           {isDark ? <Sun size={18} /> : <Moon size={18} />}
@@ -108,10 +139,10 @@ export default function TopNav({ title }: TopNavProps) {
               to="/profile"
               className="flex items-center gap-2 px-2 py-1.5 rounded-xl hover:bg-[var(--color-bg-elevated)] transition-all duration-200 group"
             >
-              <div className="w-6 h-6 rounded-full bg-primary-500/20 flex items-center justify-center text-primary-500 font-semibold text-xs group-hover:bg-primary-500/30 transition-all duration-200">
+              <div className="w-6 h-6 rounded-full bg-primary-500/20 flex items-center justify-center text-primary-600 font-bold text-xs group-hover:bg-primary-500/30 transition-all duration-200">
                 {user.name?.charAt(0).toUpperCase() || 'U'}
               </div>
-              <span className="text-sm text-[var(--color-text-secondary)] group-hover:text-[var(--color-text-primary)] transition-colors max-w-[120px] truncate">
+              <span className="text-sm font-medium text-[var(--color-text-secondary)] group-hover:text-[var(--color-text-primary)] transition-colors max-w-[120px] truncate">
                 {user.name}
               </span>
             </Link>

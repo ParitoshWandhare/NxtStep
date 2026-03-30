@@ -4,7 +4,8 @@
 //  1. Camera preview black screen → proper stream → video ref wiring
 //  2. STT stops immediately → restart loop on onend
 //  3. Full-screen camera view with question overlay
-//  4. Removed duplicate useState/useEffect imports (lines 48,65,83 errors)
+//  4. Added 2.5s delay before showing "waiting for next question"
+//     so follow-up evaluation has time to complete
 // ============================================================
 
 import { useEffect, useRef, useCallback, useState } from 'react';
@@ -18,8 +19,8 @@ import {
 import { useAppDispatch, useAppSelector } from '@/app/hooks';
 import {
   selectCurrentQuestion, selectIsWaiting, selectIsAnswering,
-  selectPendingAnswer, selectProctoringWarnings, selectIsSessionActive,
-  selectEngineState, setIsAnswering, setPendingAnswer, setCurrentQuestion,
+  selectProctoringWarnings, selectIsSessionActive,
+  selectEngineState, setIsAnswering, setCurrentQuestion,
   setWaitingForQuestion,
 } from '@/features/interview/interviewSlice';
 import { selectToken } from '@/features/auth/authSlice';
@@ -79,7 +80,6 @@ function useSpeechRecognition({
       };
 
       recog.onend = () => {
-        // Auto-restart if user hasn't explicitly stopped
         if (isListeningRef.current) {
           try {
             recog.start();
@@ -96,7 +96,6 @@ function useSpeechRecognition({
           isListeningRef.current = false;
           setIsListening(false);
         }
-        // For other errors (network, aborted), let onend handle restart
       };
 
       return recog;
@@ -199,7 +198,6 @@ function PermissionGate({ onReady, sessionRole }: PermissionGateProps) {
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
-  // Wire stream to video element when both are ready
   useEffect(() => {
     if (permState === 'granted' && videoRef.current && streamRef.current) {
       videoRef.current.srcObject = streamRef.current;
@@ -235,27 +233,9 @@ function PermissionGate({ onReady, sessionRole }: PermissionGateProps) {
   };
 
   const checkItems = [
-    {
-      key: 'camera',
-      icon: Camera,
-      iconOff: CameraOff,
-      label: 'Camera',
-      desc: 'Required for proctoring & visibility',
-    },
-    {
-      key: 'microphone',
-      icon: Mic,
-      iconOff: MicOff,
-      label: 'Microphone',
-      desc: 'Required for voice answers',
-    },
-    {
-      key: 'fullscreen',
-      icon: Maximize,
-      iconOff: Maximize,
-      label: 'Fullscreen',
-      desc: isFullscreen ? 'Active' : 'Will activate when you begin',
-    },
+    { key: 'camera', icon: Camera, iconOff: CameraOff, label: 'Camera', desc: 'Required for proctoring & visibility' },
+    { key: 'microphone', icon: Mic, iconOff: MicOff, label: 'Microphone', desc: 'Required for voice answers' },
+    { key: 'fullscreen', icon: Maximize, iconOff: Maximize, label: 'Fullscreen', desc: isFullscreen ? 'Active' : 'Will activate when you begin' },
   ];
 
   return (
@@ -268,7 +248,7 @@ function PermissionGate({ onReady, sessionRole }: PermissionGateProps) {
             </div>
             <h2 className="font-display font-bold text-2xl text-[var(--color-text-primary)] mb-1">Before you begin</h2>
             <p className="text-sm text-[var(--color-text-muted)]">
-              Interview for <span className="text-primary-500 font-medium">{sessionRole}</span>
+              Interview for <span className="text-primary-600 font-semibold">{sessionRole}</span>
             </p>
           </div>
 
@@ -292,7 +272,7 @@ function PermissionGate({ onReady, sessionRole }: PermissionGateProps) {
                     <IconComp size={16} />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-medium text-[var(--color-text-primary)]">{item.label}</p>
+                    <p className="text-sm font-semibold text-[var(--color-text-primary)]">{item.label}</p>
                     <p className="text-xs text-[var(--color-text-muted)]">{item.desc}</p>
                   </div>
                   {isGranted && <CheckCircle2 size={16} className="text-emerald-500 shrink-0 animate-scale-in" />}
@@ -309,7 +289,6 @@ function PermissionGate({ onReady, sessionRole }: PermissionGateProps) {
             </div>
           )}
 
-          {/* Camera preview — use autoPlay + playsInline, no srcObject in JSX */}
           {permState === 'granted' && (
             <div className="relative mb-4 rounded-xl overflow-hidden bg-black aspect-video animate-fade-in">
               <video
@@ -322,7 +301,7 @@ function PermissionGate({ onReady, sessionRole }: PermissionGateProps) {
               />
               <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/70">
                 <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                <span className="text-white text-xs font-medium">Camera Preview</span>
+                <span className="text-white text-xs font-semibold">Camera Preview</span>
               </div>
             </div>
           )}
@@ -368,13 +347,14 @@ interface FullScreenInterviewProps {
   proctoringWarnings: number;
   engineState: string;
   isWaiting: boolean;
+  waitingMessage: string;
   sessionRole: string;
 }
 
 function FullScreenInterview({
   stream, question, answerCount, isSpeaking, isMuted,
   onSpeak, onStopSpeak, onToggleMute, onSubmit, isSubmitting,
-  proctoringWarnings, engineState, isWaiting, sessionRole,
+  proctoringWarnings, engineState, isWaiting, waitingMessage, sessionRole,
 }: FullScreenInterviewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [transcript, setTranscript] = useState('');
@@ -382,14 +362,12 @@ function FullScreenInterview({
   const [manualText, setManualText] = useState('');
   const [submitted, setSubmitted] = useState(false);
 
-  // Wire camera stream to video
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
     }
   }, [stream]);
 
-  // Reset on new question
   useEffect(() => {
     setTranscript('');
     setManualText('');
@@ -422,8 +400,6 @@ function FullScreenInterview({
   const activeText = isManualMode ? manualText : transcript;
   const canSubmit = activeText.trim().length >= 3 && !isSubmitting && !submitted;
 
-  const progressPct = Math.min((answerCount / 10) * 100, 100);
-
   return (
     <div className="fixed inset-0 z-40 bg-black flex flex-col">
       {/* ── Full-screen camera ─────────────────────────────── */}
@@ -445,12 +421,12 @@ function FullScreenInterview({
           <div className="w-7 h-7 rounded-lg bg-primary-500 flex items-center justify-center shadow-glow-sm">
             <span className="text-white font-display font-bold text-xs">N</span>
           </div>
-          <span className="text-white/70 text-sm font-medium">{sessionRole}</span>
+          <span className="text-white/70 text-sm font-semibold">{sessionRole}</span>
           <Badge variant="success" size="sm" dot>Live</Badge>
         </div>
 
         <div className="flex items-center gap-4">
-          {/* Progress */}
+          {/* Progress dots */}
           <div className="flex items-center gap-2">
             <div className="flex gap-1">
               {Array.from({ length: 10 }).map((_, i) => (
@@ -489,7 +465,7 @@ function FullScreenInterview({
           {proctoringWarnings > 0 && (
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-yellow-500/20 border border-yellow-500/30">
               <AlertTriangle size={14} className="text-yellow-400 animate-pulse" />
-              <span className="text-yellow-300 text-xs font-medium">
+              <span className="text-yellow-300 text-xs font-semibold">
                 {proctoringWarnings}/5 tab switches
               </span>
             </div>
@@ -507,14 +483,17 @@ function FullScreenInterview({
               </div>
               <div className="absolute -inset-1 rounded-2xl border-2 border-primary-500/20 animate-ping" />
             </div>
-            <p className="text-white/80 font-display font-medium text-lg">
-              {engineState === 'EVALUATE' ? 'Evaluating your answer…' : 'Generating next question…'}
+            <p className="text-white/80 font-display font-semibold text-lg">
+              {waitingMessage}
             </p>
             <p className="text-white/40 text-sm mt-1">AI is preparing your interview in real-time</p>
+            {/* Progress bar for loading indicator */}
+            <div className="mt-4 w-48 mx-auto h-1 bg-white/10 rounded-full overflow-hidden">
+              <div className="h-full bg-primary-400/70 rounded-full animate-[shimmer_2s_infinite]" style={{ width: '60%' }} />
+            </div>
           </div>
         ) : (
           <div className="max-w-3xl w-full">
-            {/* Question card */}
             <div className="backdrop-blur-xl bg-black/40 border border-white/10 rounded-3xl p-8 shadow-2xl">
               <div className="flex items-center gap-2 mb-4">
                 <div className="w-8 h-8 rounded-full bg-primary-500 flex items-center justify-center text-white font-bold text-sm shadow-glow-sm">
@@ -547,7 +526,7 @@ function FullScreenInterview({
                 )}
               </div>
 
-              <p className="text-white font-medium text-xl leading-relaxed">
+              <p className="text-white font-semibold text-xl leading-relaxed">
                 {question.text}
               </p>
             </div>
@@ -562,7 +541,7 @@ function FullScreenInterview({
             <div className="backdrop-blur-xl bg-emerald-500/20 border border-emerald-500/30 rounded-2xl p-4 flex items-center gap-3">
               <CheckCircle2 size={20} className="text-emerald-400 animate-scale-in" />
               <div>
-                <p className="text-white font-medium text-sm">Answer submitted!</p>
+                <p className="text-white font-semibold text-sm">Answer submitted!</p>
                 <p className="text-white/50 text-xs">AI is evaluating and preparing next question…</p>
               </div>
             </div>
@@ -572,7 +551,7 @@ function FullScreenInterview({
               <div className="flex items-center justify-between px-4 pt-3 pb-1">
                 <div className="flex items-center gap-2">
                   {isListening && (
-                    <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-medium animate-pulse">
+                    <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-semibold animate-pulse">
                       <Radio size={10} />
                       Recording
                     </span>
@@ -613,7 +592,6 @@ function FullScreenInterview({
                   />
                 ) : (
                   <div className="min-h-[60px]">
-                    {/* Waveform when recording */}
                     {isListening && (
                       <div className="flex items-center gap-1 mb-2 h-5">
                         {Array.from({ length: 24 }).map((_, i) => (
@@ -642,13 +620,12 @@ function FullScreenInterview({
 
               {/* Controls */}
               <div className="flex items-center gap-3 px-4 pb-4">
-                {/* Mic button */}
                 {!isManualMode && (
                   <button
                     onClick={handleToggleMic}
                     disabled={!isSupported || isSubmitting}
                     className={cn(
-                      'flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm transition-all duration-200',
+                      'flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all duration-200',
                       isListening
                         ? 'bg-red-500 text-white shadow-lg shadow-red-500/30 scale-[1.02] hover:bg-red-600'
                         : 'bg-white/10 border border-white/20 text-white hover:bg-white/20',
@@ -669,7 +646,6 @@ function FullScreenInterview({
                   </button>
                 )}
 
-                {/* Clear */}
                 {activeText && !isListening && (
                   <button
                     onClick={() => {
@@ -683,7 +659,6 @@ function FullScreenInterview({
                   </button>
                 )}
 
-                {/* Submit */}
                 <Button
                   onClick={handleSubmit}
                   disabled={!canSubmit}
@@ -715,6 +690,14 @@ export default function InterviewSessionPage() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const [liveStream, setLiveStream] = useState<MediaStream | null>(null);
 
+  // ── KEY FIX: Delayed waiting state ────────────────────────
+  // After submitting answer, show "evaluating" for at least 2.5s
+  // before transitioning to "waiting for next question"
+  // This gives the follow-up evaluation time to complete
+  const [delayedWaiting, setDelayedWaiting] = useState(false);
+  const [waitingMessage, setWaitingMessage] = useState('Generating next question…');
+  const waitingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const { isSpeaking, isMuted, speak, cancel: cancelTTS, toggleMute } = useTextToSpeech();
 
   const dispatch = useAppDispatch();
@@ -730,6 +713,32 @@ export default function InterviewSessionPage() {
   const { data: sessionStatus } = useSessionStatus(sessionId || '', !!sessionId && permGranted);
   const submitAnswerMutation = useSubmitAnswer(sessionId || '');
   const logEvent = useLogProctoringEvent(sessionId || '');
+
+  // ── Handle delayed waiting state ──────────────────────────
+  // When answer is submitted, show evaluation message for 2.5s
+  // then show "loading next question" — prevents jarring transitions
+  useEffect(() => {
+    if (isAnswering || submitAnswerMutation.isPending) {
+      setDelayedWaiting(true);
+      setWaitingMessage('Evaluating your answer…');
+      if (waitingTimerRef.current) clearTimeout(waitingTimerRef.current);
+    } else if (isWaiting && !currentQuestion) {
+      // Evaluation done, now waiting for next question
+      // Add a 2.5s buffer so any pending follow-up can arrive
+      waitingTimerRef.current = setTimeout(() => {
+        setDelayedWaiting(true);
+        setWaitingMessage('Generating next question…');
+      }, 2500);
+    } else if (currentQuestion) {
+      // Question arrived, clear waiting state
+      if (waitingTimerRef.current) clearTimeout(waitingTimerRef.current);
+      setDelayedWaiting(false);
+    }
+
+    return () => {
+      if (waitingTimerRef.current) clearTimeout(waitingTimerRef.current);
+    };
+  }, [isAnswering, submitAnswerMutation.isPending, isWaiting, currentQuestion]);
 
   // Proctoring: tab switch detection
   useEffect(() => {
@@ -796,16 +805,17 @@ export default function InterviewSessionPage() {
     }
   }, [session?.status, navigate, sessionId]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
       mediaStreamRef.current?.getTracks().forEach(t => t.stop());
       window.speechSynthesis?.cancel();
+      if (waitingTimerRef.current) clearTimeout(waitingTimerRef.current);
     };
   }, []);
 
   const answerCount = session?.answers?.length || 0;
+  const showWaiting = delayedWaiting || isWaiting || !currentQuestion;
 
   const handleSubmitAnswer = async (text: string) => {
     if (!currentQuestion || !text.trim()) return;
@@ -821,7 +831,6 @@ export default function InterviewSessionPage() {
     }
   };
 
-  // Pre-session permission gate
   if (!permGranted) {
     return (
       <PermissionGate
@@ -851,7 +860,8 @@ export default function InterviewSessionPage() {
       isSubmitting={isAnswering || submitAnswerMutation.isPending}
       proctoringWarnings={proctoringWarnings}
       engineState={engineState}
-      isWaiting={isWaiting || !currentQuestion}
+      isWaiting={showWaiting}
+      waitingMessage={waitingMessage}
       sessionRole={session?.role || 'Interview'}
     />
   );
