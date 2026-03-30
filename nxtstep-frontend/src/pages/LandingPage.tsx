@@ -1,15 +1,21 @@
 // ============================================================
 // NxtStep — Landing Page
-// FIX: Auth-aware navbar — shows Profile when logged in, hides login/signup.
-// ADDED: Rich entrance animations, hover effects, floating elements.
+// ADDED: Top navbar with Home, About, Contact links
+// Auth-aware: shows Dashboard/Profile when logged in
 // ============================================================
 
-import { Link } from 'react-router-dom';
-import { ArrowRight, Zap, BarChart3, Target, Sparkles, CheckCircle2, Sun, Moon, User, LayoutDashboard } from 'lucide-react';
+import { Link, useLocation } from 'react-router-dom';
+import {
+  ArrowRight, Zap, BarChart3, Target, Sparkles,
+  CheckCircle2, Sun, Moon, User, LayoutDashboard,
+  Mail, MessageSquare, MapPin, Phone, Github, Twitter, Linkedin,
+} from 'lucide-react';
 import { useTheme } from '@/hooks';
 import { usePageTitle } from '@/hooks';
 import { useAppSelector } from '@/app/hooks';
 import { selectIsAuthenticated, selectCurrentUser } from '@/features/auth/authSlice';
+import { useState } from 'react';
+import { cn } from '@/utils';
 
 const FEATURES = [
   {
@@ -35,8 +41,8 @@ const FEATURES = [
   },
   {
     icon: <Sparkles className="w-5 h-5" />,
-    title: 'Personalised News Feed',
-    desc: 'Hybrid-scored tech news from TechCrunch, Wired, and more — tailored to your interests.',
+    title: 'Voice-First Experience',
+    desc: 'Questions read aloud via TTS, answers captured by STT — a truly immersive interview simulation.',
     color: 'text-emerald-500 bg-emerald-500/10',
     delay: '300ms',
   },
@@ -45,30 +51,251 @@ const FEATURES = [
 const PERKS = [
   'Real-time Socket.IO delivery',
   'Anti-cheat proctoring',
-  'Follow-up questions on weak answers',
+  'Voice TTS/STT interview flow',
   'Scorecard radar chart',
   'Salary range data per role',
   'Dark & light theme',
 ];
 
+const NAV_LINKS = [
+  { label: 'Home', href: '/' },
+  { label: 'About', href: '/about' },
+  { label: 'Contact', href: '/contact' },
+];
+
+// ── About Page ────────────────────────────────────────────────
+function AboutPage() {
+  usePageTitle('About NxtStep');
+  return (
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-16 space-y-16">
+      {/* Hero */}
+      <div className="text-center animate-slide-up">
+        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-primary-500/10 border border-primary-500/20 text-primary-500 text-sm font-medium mb-6">
+          <Sparkles size={14} />
+          Our Mission
+        </div>
+        <h1 className="font-display font-bold text-4xl sm:text-5xl text-[var(--color-text-primary)] mb-6 leading-tight">
+          Built to help you{' '}
+          <span className="text-gradient">land the job</span>
+        </h1>
+        <p className="text-lg text-[var(--color-text-secondary)] max-w-2xl mx-auto leading-relaxed">
+          NxtStep is an AI-powered interview preparation platform that simulates real technical interviews,
+          evaluates your performance across five professional dimensions, and recommends career paths tailored
+          specifically to your demonstrated strengths.
+        </p>
+      </div>
+
+      {/* Values */}
+      <div className="grid sm:grid-cols-3 gap-6">
+        {[
+          { icon: '🎯', title: 'Precision', desc: 'Every question is calibrated to your target role and experience level using advanced LLMs with few-shot calibration.' },
+          { icon: '🔬', title: 'Depth', desc: 'We evaluate five dimensions — not just technical knowledge — because great engineers need more than code skills.' },
+          { icon: '🚀', title: 'Real-time', desc: 'Questions are generated live, not pre-seeded. Every session is unique and adapts to your answers.' },
+        ].map(v => (
+          <div key={v.title} className="p-6 rounded-2xl bg-[var(--color-bg-card)] border border-[var(--color-border)] hover:-translate-y-1 hover:shadow-md transition-all duration-300 group">
+            <div className="text-4xl mb-4 group-hover:scale-110 transition-transform duration-300">{v.icon}</div>
+            <h3 className="font-display font-semibold text-lg text-[var(--color-text-primary)] mb-2">{v.title}</h3>
+            <p className="text-sm text-[var(--color-text-secondary)] leading-relaxed">{v.desc}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Stack */}
+      <div className="p-8 rounded-2xl bg-[var(--color-bg-card)] border border-[var(--color-border)]">
+        <h2 className="font-display font-bold text-2xl text-[var(--color-text-primary)] mb-6 text-center">Built with world-class technology</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          {[
+            { label: 'React 18 + TypeScript', icon: '⚛️' },
+            { label: 'Node.js + Express', icon: '🟢' },
+            { label: 'MongoDB + Redis', icon: '🗄️' },
+            { label: 'Socket.IO Real-time', icon: '⚡' },
+            { label: 'BullMQ Workers', icon: '⚙️' },
+            { label: 'OpenRouter AI', icon: '🤖' },
+            { label: 'JWT Auth + OTP', icon: '🔐' },
+            { label: 'Docker + CI/CD', icon: '🐳' },
+          ].map(t => (
+            <div key={t.label} className="flex items-center gap-2.5 p-3 rounded-xl bg-[var(--color-bg-elevated)] border border-[var(--color-border)]">
+              <span className="text-xl">{t.icon}</span>
+              <span className="text-xs font-medium text-[var(--color-text-secondary)]">{t.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* CTA */}
+      <div className="text-center">
+        <Link to="/register" className="btn-primary text-base px-8 py-3 h-12 shadow-glow hover:shadow-glow-lg hover:scale-105 transition-all duration-300 inline-flex items-center gap-2">
+          Start for free <ArrowRight size={18} />
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+// ── Contact Page ──────────────────────────────────────────────
+function ContactPage() {
+  usePageTitle('Contact NxtStep');
+  const [form, setForm] = useState({ name: '', email: '', subject: '', message: '' });
+  const [sent, setSent] = useState(false);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    // In production, wire to an email service
+    setSent(true);
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-16">
+      <div className="text-center mb-12 animate-slide-up">
+        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-primary-500/10 border border-primary-500/20 text-primary-500 text-sm font-medium mb-6">
+          <MessageSquare size={14} />
+          Get in touch
+        </div>
+        <h1 className="font-display font-bold text-4xl sm:text-5xl text-[var(--color-text-primary)] mb-4">
+          We'd love to <span className="text-gradient">hear from you</span>
+        </h1>
+        <p className="text-lg text-[var(--color-text-secondary)] max-w-xl mx-auto">
+          Have feedback, questions, or partnership ideas? Drop us a message and we'll get back within 24 hours.
+        </p>
+      </div>
+
+      <div className="grid sm:grid-cols-[1fr_320px] gap-8">
+        {/* Form */}
+        <div className="p-8 rounded-2xl bg-[var(--color-bg-card)] border border-[var(--color-border)] animate-slide-up">
+          {sent ? (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 flex items-center justify-center mx-auto mb-4">
+                <CheckCircle2 size={32} className="text-emerald-500" />
+              </div>
+              <h3 className="font-display font-bold text-xl text-[var(--color-text-primary)] mb-2">Message sent!</h3>
+              <p className="text-sm text-[var(--color-text-muted)]">We'll get back to you within 24 hours.</p>
+              <button onClick={() => { setSent(false); setForm({ name: '', email: '', subject: '', message: '' }); }}
+                className="mt-4 text-sm text-primary-500 hover:underline">Send another message</button>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="label-field">Name</label>
+                  <input required value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
+                    placeholder="Your full name" className="input-field" />
+                </div>
+                <div>
+                  <label className="label-field">Email</label>
+                  <input required type="email" value={form.email} onChange={e => setForm(p => ({ ...p, email: e.target.value }))}
+                    placeholder="you@example.com" className="input-field" />
+                </div>
+              </div>
+              <div>
+                <label className="label-field">Subject</label>
+                <input required value={form.subject} onChange={e => setForm(p => ({ ...p, subject: e.target.value }))}
+                  placeholder="What's this about?" className="input-field" />
+              </div>
+              <div>
+                <label className="label-field">Message</label>
+                <textarea required value={form.message} onChange={e => setForm(p => ({ ...p, message: e.target.value }))}
+                  placeholder="Tell us more…" rows={5} className="input-field resize-none" />
+              </div>
+              <button type="submit" className="btn-primary w-full text-base h-11 hover:shadow-glow transition-all duration-300">
+                Send Message
+              </button>
+            </form>
+          )}
+        </div>
+
+        {/* Info */}
+        <div className="space-y-4">
+          {[
+            { icon: <Mail size={18} />, label: 'Email', value: 'hello@nxtstep.app', color: 'text-primary-500 bg-primary-500/10' },
+            { icon: <MapPin size={18} />, label: 'Location', value: 'Remote-first, global team', color: 'text-secondary-500 bg-secondary-500/10' },
+            { icon: <Phone size={18} />, label: 'Response time', value: 'Within 24 hours', color: 'text-emerald-500 bg-emerald-500/10' },
+          ].map(item => (
+            <div key={item.label} className="flex items-center gap-4 p-5 rounded-2xl bg-[var(--color-bg-card)] border border-[var(--color-border)] hover:-translate-y-0.5 hover:shadow-md transition-all duration-300">
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${item.color}`}>{item.icon}</div>
+              <div>
+                <p className="text-xs text-[var(--color-text-muted)] font-medium mb-0.5">{item.label}</p>
+                <p className="text-sm text-[var(--color-text-primary)] font-medium">{item.value}</p>
+              </div>
+            </div>
+          ))}
+
+          {/* Social */}
+          <div className="p-5 rounded-2xl bg-[var(--color-bg-card)] border border-[var(--color-border)]">
+            <p className="text-xs text-[var(--color-text-muted)] font-medium mb-3">Follow us</p>
+            <div className="flex gap-3">
+              {[
+                { icon: <Twitter size={16} />, label: 'Twitter', href: '#' },
+                { icon: <Github size={16} />, label: 'GitHub', href: '#' },
+                { icon: <Linkedin size={16} />, label: 'LinkedIn', href: '#' },
+              ].map(s => (
+                <a key={s.label} href={s.href} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-sm text-[var(--color-text-muted)] hover:text-primary-500 hover:border-primary-500/50 transition-all duration-200">
+                  {s.icon}
+                  <span className="text-xs">{s.label}</span>
+                </a>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main Landing Export ────────────────────────────────────────
 export default function LandingPage() {
   usePageTitle('AI Interview Platform');
   const { isDark, toggle } = useTheme();
   const isAuthenticated = useAppSelector(selectIsAuthenticated);
   const user = useAppSelector(selectCurrentUser);
+  const location = useLocation();
+
+  const isAbout = location.pathname === '/about';
+  const isContact = location.pathname === '/contact';
+
+  // Render sub-pages inside same shell
+  const renderContent = () => {
+    if (isAbout) return <AboutPage />;
+    if (isContact) return <ContactPage />;
+    return <HomepageContent isAuthenticated={!!isAuthenticated} user={user} />;
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--color-bg)] overflow-x-hidden">
       {/* ── Navbar ─────────────────────────────────────────── */}
       <nav className="sticky top-0 z-30 border-b border-[var(--color-border)] bg-[var(--color-bg)]/80 backdrop-blur-md">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2.5 group">
-            <div className="w-8 h-8 rounded-xl bg-primary-500 flex items-center justify-center shadow-glow-sm transition-all duration-300 group-hover:shadow-glow group-hover:scale-110">
-              <span className="text-white font-display font-bold text-sm">N</span>
+          {/* Logo */}
+          <div className="flex items-center gap-6">
+            <Link to="/" className="flex items-center gap-2.5 group">
+              <div className="w-8 h-8 rounded-xl bg-primary-500 flex items-center justify-center shadow-glow-sm transition-all duration-300 group-hover:shadow-glow group-hover:scale-110">
+                <span className="text-white font-display font-bold text-sm">N</span>
+              </div>
+              <span className="font-display font-bold text-base text-[var(--color-text-primary)] group-hover:text-primary-500 transition-colors duration-200">
+                NxtStep
+              </span>
+            </Link>
+
+            {/* Nav links */}
+            <div className="hidden sm:flex items-center gap-1">
+              {NAV_LINKS.map(link => (
+                <Link
+                  key={link.label}
+                  to={link.href}
+                  className={cn(
+                    'px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200',
+                    location.pathname === link.href
+                      ? 'text-primary-500 bg-primary-500/10'
+                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-elevated)]'
+                  )}
+                >
+                  {link.label}
+                </Link>
+              ))}
             </div>
-            <span className="font-display font-bold text-base text-[var(--color-text-primary)]">NxtStep</span>
           </div>
 
+          {/* Right actions */}
           <div className="flex items-center gap-3">
             <button
               onClick={toggle}
@@ -79,27 +306,19 @@ export default function LandingPage() {
             </button>
 
             {isAuthenticated ? (
-              /* ── Logged-in state ── */
               <div className="flex items-center gap-2">
-                <Link
-                  to="/dashboard"
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-all duration-200"
-                >
+                <Link to="/dashboard" className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-all duration-200">
                   <LayoutDashboard size={16} />
-                  Dashboard
+                  <span className="hidden sm:inline">Dashboard</span>
                 </Link>
-                <Link
-                  to="/profile"
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium bg-primary-500/10 text-primary-500 hover:bg-primary-500/20 transition-all duration-200 hover:scale-105"
-                >
+                <Link to="/profile" className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium bg-primary-500/10 text-primary-500 hover:bg-primary-500/20 transition-all duration-200 hover:scale-105">
                   <div className="w-6 h-6 rounded-full bg-primary-500 flex items-center justify-center text-white font-bold text-xs">
                     {user?.name?.charAt(0).toUpperCase() || <User size={12} />}
                   </div>
-                  {user?.name?.split(' ')[0] || 'Profile'}
+                  <span className="hidden sm:inline">{user?.name?.split(' ')[0] || 'Profile'}</span>
                 </Link>
               </div>
             ) : (
-              /* ── Guest state ── */
               <>
                 <Link to="/login" className="btn-secondary text-sm px-4 py-2 h-9 transition-all duration-200 hover:scale-105 hover:border-primary-400">
                   Sign in
@@ -111,35 +330,73 @@ export default function LandingPage() {
             )}
           </div>
         </div>
+
+        {/* Mobile nav */}
+        <div className="sm:hidden flex items-center gap-1 px-4 pb-2 overflow-x-auto scrollbar-hide">
+          {NAV_LINKS.map(link => (
+            <Link
+              key={link.label}
+              to={link.href}
+              className={cn(
+                'px-3 py-1 rounded-lg text-xs font-medium whitespace-nowrap transition-all duration-200',
+                location.pathname === link.href
+                  ? 'text-primary-500 bg-primary-500/10'
+                  : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+              )}
+            >
+              {link.label}
+            </Link>
+          ))}
+        </div>
       </nav>
 
-      {/* ── Hero ───────────────────────────────────────────── */}
-      <section className="relative flex-1 flex flex-col items-center justify-center text-center px-4 py-24 overflow-hidden">
-        {/* Animated background blobs */}
+      {/* Content */}
+      <main className="flex-1">
+        {renderContent()}
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-[var(--color-border)] py-8 px-4">
+        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-lg bg-primary-500 flex items-center justify-center">
+              <span className="text-white font-display font-bold text-xs">N</span>
+            </div>
+            <span className="font-display font-semibold text-sm text-[var(--color-text-primary)]">NxtStep</span>
+          </div>
+          <div className="flex items-center gap-6">
+            {NAV_LINKS.map(link => (
+              <Link key={link.label} to={link.href} className="text-xs text-[var(--color-text-muted)] hover:text-primary-500 transition-colors duration-200">
+                {link.label}
+              </Link>
+            ))}
+          </div>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            © {new Date().getFullYear()} NxtStep. All rights reserved.
+          </p>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+// ── Homepage Content (extracted) ──────────────────────────────
+function HomepageContent({ isAuthenticated, user }: { isAuthenticated: boolean; user: any }) {
+  return (
+    <>
+      {/* Hero */}
+      <section className="relative flex flex-col items-center justify-center text-center px-4 py-24 overflow-hidden">
         <div className="absolute inset-0 bg-mesh pointer-events-none" />
         <div className="absolute top-20 -left-32 w-96 h-96 bg-primary-500/8 rounded-full blur-3xl pointer-events-none animate-pulse" style={{ animationDuration: '4s' }} />
         <div className="absolute bottom-20 -right-32 w-96 h-96 bg-secondary-500/8 rounded-full blur-3xl pointer-events-none animate-pulse" style={{ animationDuration: '6s' }} />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-accent-500/3 rounded-full blur-3xl pointer-events-none animate-pulse" style={{ animationDuration: '8s' }} />
-
-        {/* Floating decorative elements */}
-        <div className="absolute top-24 left-[10%] w-3 h-3 rounded-full bg-primary-400/40 animate-bounce" style={{ animationDelay: '0ms', animationDuration: '3s' }} />
-        <div className="absolute top-40 right-[15%] w-2 h-2 rounded-full bg-accent-400/40 animate-bounce" style={{ animationDelay: '500ms', animationDuration: '4s' }} />
-        <div className="absolute bottom-32 left-[20%] w-2 h-2 rounded-full bg-secondary-400/40 animate-bounce" style={{ animationDelay: '1000ms', animationDuration: '3.5s' }} />
-        <div className="absolute top-56 left-[30%] w-1.5 h-1.5 rounded-full bg-emerald-400/40 animate-bounce" style={{ animationDelay: '700ms', animationDuration: '5s' }} />
 
         <div className="relative z-10 max-w-4xl mx-auto">
-          <div
-            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-primary-500/10 border border-primary-500/20 text-primary-500 text-sm font-medium mb-8 animate-fade-in hover:bg-primary-500/15 hover:scale-105 transition-all duration-300 cursor-default"
-            style={{ animationDelay: '0ms' }}
-          >
+          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-primary-500/10 border border-primary-500/20 text-primary-500 text-sm font-medium mb-8 animate-fade-in hover:bg-primary-500/15 hover:scale-105 transition-all duration-300 cursor-default">
             <Sparkles size={14} className="animate-pulse" />
             AI-powered interview preparation
           </div>
 
-          <h1
-            className="font-display font-bold text-4xl sm:text-5xl lg:text-6xl text-[var(--color-text-primary)] leading-tight mb-6 animate-slide-up"
-            style={{ animationDelay: '100ms', animationFillMode: 'both' }}
-          >
+          <h1 className="font-display font-bold text-4xl sm:text-5xl lg:text-6xl text-[var(--color-text-primary)] leading-tight mb-6 animate-slide-up" style={{ animationDelay: '100ms', animationFillMode: 'both' }}>
             Land your dream role
             <br />
             with{' '}
@@ -149,35 +406,20 @@ export default function LandingPage() {
             </span>
           </h1>
 
-          <p
-            className="text-lg sm:text-xl text-[var(--color-text-secondary)] max-w-2xl mx-auto mb-10 leading-relaxed animate-slide-up"
-            style={{ animationDelay: '200ms', animationFillMode: 'both' }}
-          >
-            Practice real interviews, get five-dimension feedback, discover role matches, and stay sharp
-            with a personalised tech news feed — all in one platform.
+          <p className="text-lg sm:text-xl text-[var(--color-text-secondary)] max-w-2xl mx-auto mb-10 leading-relaxed animate-slide-up" style={{ animationDelay: '200ms', animationFillMode: 'both' }}>
+            Practice real interviews with voice-first AI — questions read aloud, answers captured by speech recognition.
+            Get five-dimension feedback, role matches, and stay sharp with curated tech news.
           </p>
 
-          <div
-            className="flex flex-col sm:flex-row items-center justify-center gap-4 animate-slide-up"
-            style={{ animationDelay: '300ms', animationFillMode: 'both' }}
-          >
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4 animate-slide-up" style={{ animationDelay: '300ms', animationFillMode: 'both' }}>
             {isAuthenticated ? (
-              <Link
-                to="/interview/new"
-                className="btn-primary text-base px-7 py-3 h-12 gap-2 shadow-glow hover:shadow-glow-lg hover:scale-105 transition-all duration-300"
-              >
-                <Zap size={18} />
-                Start Interview
-                <ArrowRight size={18} />
+              <Link to="/interview/new" className="btn-primary text-base px-7 py-3 h-12 gap-2 shadow-glow hover:shadow-glow-lg hover:scale-105 transition-all duration-300 inline-flex items-center">
+                <Zap size={18} /> Start Interview <ArrowRight size={18} />
               </Link>
             ) : (
               <>
-                <Link
-                  to="/register"
-                  className="btn-primary text-base px-7 py-3 h-12 gap-2 shadow-glow hover:shadow-glow-lg hover:scale-105 transition-all duration-300"
-                >
-                  Start for free
-                  <ArrowRight size={18} />
+                <Link to="/register" className="btn-primary text-base px-7 py-3 h-12 gap-2 shadow-glow hover:shadow-glow-lg hover:scale-105 transition-all duration-300 inline-flex items-center">
+                  Start for free <ArrowRight size={18} />
                 </Link>
                 <Link to="/login" className="btn-secondary text-base px-7 py-3 h-12 hover:scale-105 transition-all duration-300">
                   Sign in
@@ -186,16 +428,8 @@ export default function LandingPage() {
             )}
           </div>
 
-          {/* Stats row */}
-          <div
-            className="flex items-center justify-center gap-8 mt-12 animate-fade-in"
-            style={{ animationDelay: '500ms', animationFillMode: 'both' }}
-          >
-            {[
-              { value: '45+', label: 'Role Templates' },
-              { value: '5', label: 'Scoring Dimensions' },
-              { value: '10', label: 'Questions / Session' },
-            ].map(({ value, label }) => (
+          <div className="flex items-center justify-center gap-8 mt-12 animate-fade-in" style={{ animationDelay: '500ms', animationFillMode: 'both' }}>
+            {[{ value: '45+', label: 'Role Templates' }, { value: '5', label: 'Scoring Dimensions' }, { value: '10', label: 'Questions / Session' }].map(({ value, label }) => (
               <div key={label} className="text-center group cursor-default">
                 <p className="font-display font-bold text-2xl text-gradient group-hover:scale-110 transition-transform duration-300 inline-block">{value}</p>
                 <p className="text-xs text-[var(--color-text-muted)] mt-0.5">{label}</p>
@@ -205,29 +439,20 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── Features Grid ──────────────────────────────────── */}
+      {/* Features */}
       <section className="py-20 px-4 bg-[var(--color-bg-secondary)]">
         <div className="max-w-6xl mx-auto">
-          <h2 className="font-display font-bold text-3xl text-center text-[var(--color-text-primary)] mb-4 animate-fade-in">
+          <h2 className="font-display font-bold text-3xl text-center text-[var(--color-text-primary)] mb-4">
             Everything you need to ace the interview
           </h2>
-          <p className="text-[var(--color-text-secondary)] text-center max-w-xl mx-auto mb-12 animate-fade-in">
-            From question generation to role matching — NxtStep covers the full interview prep lifecycle.
+          <p className="text-[var(--color-text-secondary)] text-center max-w-xl mx-auto mb-12">
+            From voice-driven question generation to role matching — NxtStep covers the full interview prep lifecycle.
           </p>
-
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            {FEATURES.map((f) => (
-              <div
-                key={f.title}
-                className="p-6 rounded-2xl bg-[var(--color-bg-card)] border border-[var(--color-border)] hover:-translate-y-2 hover:shadow-lg hover:border-primary-500/30 transition-all duration-300 cursor-default group"
-                style={{ animationDelay: f.delay }}
-              >
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center mb-4 ${f.color} group-hover:scale-110 transition-transform duration-300`}>
-                  {f.icon}
-                </div>
-                <h3 className="font-display font-semibold text-base text-[var(--color-text-primary)] mb-2 group-hover:text-primary-500 transition-colors duration-200">
-                  {f.title}
-                </h3>
+            {FEATURES.map(f => (
+              <div key={f.title} className="p-6 rounded-2xl bg-[var(--color-bg-card)] border border-[var(--color-border)] hover:-translate-y-2 hover:shadow-lg hover:border-primary-500/30 transition-all duration-300 cursor-default group" style={{ animationDelay: f.delay }}>
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center mb-4 ${f.color} group-hover:scale-110 transition-transform duration-300`}>{f.icon}</div>
+                <h3 className="font-display font-semibold text-base text-[var(--color-text-primary)] mb-2 group-hover:text-primary-500 transition-colors duration-200">{f.title}</h3>
                 <p className="text-sm text-[var(--color-text-secondary)] leading-relaxed">{f.desc}</p>
               </div>
             ))}
@@ -235,19 +460,13 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── Perks List ─────────────────────────────────────── */}
+      {/* Perks */}
       <section className="py-20 px-4">
         <div className="max-w-2xl mx-auto text-center">
-          <h2 className="font-display font-bold text-3xl text-[var(--color-text-primary)] mb-10">
-            Built for serious candidates
-          </h2>
+          <h2 className="font-display font-bold text-3xl text-[var(--color-text-primary)] mb-10">Built for serious candidates</h2>
           <ul className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-left">
             {PERKS.map((perk, i) => (
-              <li
-                key={perk}
-                className="flex items-center gap-3 group hover:translate-x-1 transition-transform duration-200"
-                style={{ animationDelay: `${i * 80}ms` }}
-              >
+              <li key={perk} className="flex items-center gap-3 group hover:translate-x-1 transition-transform duration-200" style={{ animationDelay: `${i * 80}ms` }}>
                 <CheckCircle2 size={18} className="text-emerald-500 shrink-0 group-hover:scale-110 transition-transform duration-200" />
                 <span className="text-[var(--color-text-secondary)] text-sm group-hover:text-[var(--color-text-primary)] transition-colors duration-200">{perk}</span>
               </li>
@@ -255,33 +474,17 @@ export default function LandingPage() {
           </ul>
           <div className="mt-12">
             {isAuthenticated ? (
-              <Link
-                to="/interview/new"
-                className="btn-primary text-base px-8 py-3 h-12 shadow-glow hover:shadow-glow-lg hover:scale-105 transition-all duration-300"
-              >
-                <Zap size={18} />
-                Start Interview Now
-                <ArrowRight size={18} />
+              <Link to="/interview/new" className="btn-primary text-base px-8 py-3 h-12 shadow-glow hover:shadow-glow-lg hover:scale-105 transition-all duration-300 inline-flex items-center gap-2">
+                <Zap size={18} /> Start Interview Now <ArrowRight size={18} />
               </Link>
             ) : (
-              <Link
-                to="/register"
-                className="btn-primary text-base px-8 py-3 h-12 shadow-glow hover:shadow-glow-lg hover:scale-105 transition-all duration-300"
-              >
-                Create free account
-                <ArrowRight size={18} />
+              <Link to="/register" className="btn-primary text-base px-8 py-3 h-12 shadow-glow hover:shadow-glow-lg hover:scale-105 transition-all duration-300 inline-flex items-center gap-2">
+                Create free account <ArrowRight size={18} />
               </Link>
             )}
           </div>
         </div>
       </section>
-
-      {/* ── Footer ─────────────────────────────────────────── */}
-      <footer className="border-t border-[var(--color-border)] py-6 px-4 text-center">
-        <p className="text-xs text-[var(--color-text-muted)]">
-          © {new Date().getFullYear()} NxtStep — AI Interview Platform. All rights reserved.
-        </p>
-      </footer>
-    </div>
+    </>
   );
 }
