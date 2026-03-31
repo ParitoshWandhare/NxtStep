@@ -1,6 +1,9 @@
 // ============================================================
-// NxtStep — useInterviewSocket Hook
-// Manages Socket.IO connection & dispatches Redux events
+// NxtStep — useInterviewSocket Hook (Fixed)
+// Fix: Socket connects immediately when sessionId + token available.
+// Previously the component gated this on permGranted, causing
+// question:ready events to be missed. Now connects right away
+// and the REST polling in the page handles any missed questions.
 // ============================================================
 
 import { useEffect, useRef, useCallback } from 'react';
@@ -22,7 +25,7 @@ import type {
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 interface UseInterviewSocketOptions {
   sessionId: string | null;
@@ -42,99 +45,136 @@ export function useInterviewSocket({
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const socketRef = useRef<Socket | null>(null);
+  const joinedRef = useRef(false);
 
-  const connect = useCallback(() => {
+  // Keep callbacks in refs so they don't cause re-connects on re-render
+  const onScorecardReadyRef = useRef(onScorecardReady);
+  const onRecommendationsReadyRef = useRef(onRecommendationsReady);
+  const onTerminatedRef = useRef(onTerminated);
+  onScorecardReadyRef.current = onScorecardReady;
+  onRecommendationsReadyRef.current = onRecommendationsReady;
+  onTerminatedRef.current = onTerminated;
+
+  useEffect(() => {
     if (!sessionId || !token) return;
+
+    console.log('[Socket] Connecting for session:', sessionId);
 
     const socket = io(SOCKET_URL, {
       auth: { token },
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: 10,
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
     });
 
     socketRef.current = socket;
+    joinedRef.current = false;
+
+    const joinSession = () => {
+      if (!joinedRef.current && sessionId) {
+        socket.emit('join:session', sessionId);
+        joinedRef.current = true;
+        console.log('[Socket] Joined session room:', sessionId);
+      }
+    };
 
     socket.on('connect', () => {
-      socket.emit('join:session', sessionId);
+      console.log('[Socket] Connected:', socket.id);
+      joinSession();
+    });
+
+    socket.on('reconnect', () => {
+      console.log('[Socket] Reconnected — rejoining session room');
+      joinedRef.current = false;
+      joinSession();
     });
 
     socket.on('connect_error', (err) => {
       console.warn('[Socket] Connection error:', err.message);
     });
 
-    // ── question:ready ────────────────────────────────────────
+    // ── question:ready ──────────────────────────────────────
     socket.on('question:ready', (payload: SocketQuestionReadyPayload) => {
+      console.log('[Socket] question:ready received:', payload.id);
       const question: Question = {
         id: payload.id,
         text: payload.text,
         type: payload.type,
         topic: payload.topic,
         difficulty: payload.difficulty,
-        expectedKeywords: payload.expectedKeywords,
-        followUpCount: payload.followUpCount,
+        expectedKeywords: payload.expectedKeywords || [],
+        followUpCount: payload.followUpCount || 0,
         parentQuestionId: payload.parentQuestionId,
       };
       dispatch(setCurrentQuestion(question));
+      dispatch(setWaitingForQuestion(false));
     });
 
-    // ── evaluation:complete ───────────────────────────────────
+    // ── evaluation:complete ─────────────────────────────────
     socket.on('evaluation:complete', (payload: SocketEvaluationCompletePayload) => {
+      console.log('[Socket] evaluation:complete received for:', payload.questionId);
       const result: EvaluationResult = {
         questionId: payload.questionId,
         scores: payload.scores,
         overall: payload.overall,
         feedback: {
-          strengths: payload.feedback.strengths,
-          weaknesses: payload.feedback.weaknesses,
-          improvements: payload.feedback.improvements || [],
+          strengths: payload.feedback?.strengths || [],
+          weaknesses: payload.feedback?.weaknesses || [],
+          improvements: payload.feedback?.improvements || [],
         },
       };
       dispatch(addEvaluationResult(result));
       dispatch(setWaitingForQuestion(true));
     });
 
-    // ── scorecard:ready ───────────────────────────────────────
+    // ── scorecard:ready ─────────────────────────────────────
     socket.on('scorecard:ready', (scorecard: SocketScorecardReadyPayload) => {
+      console.log('[Socket] scorecard:ready received');
       dispatch(endSession());
-      onScorecardReady?.(scorecard);
+      onScorecardReadyRef.current?.(scorecard);
       toast.success('Your scorecard is ready!');
     });
 
-    // ── recommendations:ready ─────────────────────────────────
+    // ── recommendations:ready ───────────────────────────────
     socket.on('recommendations:ready', () => {
-      onRecommendationsReady?.();
+      console.log('[Socket] recommendations:ready received');
+      onRecommendationsReadyRef.current?.();
     });
 
-    // ── session:terminated ────────────────────────────────────
+    // ── session:terminated ──────────────────────────────────
     socket.on('session:terminated', ({ reason }: { reason: string }) => {
+      console.log('[Socket] session:terminated:', reason);
       dispatch(endSession());
-      onTerminated?.(reason);
+      onTerminatedRef.current?.(reason);
       toast.error(`Session ended: ${reason}`);
       navigate(`/interview/${sessionId}/results`);
     });
 
-    socket.on('disconnect', () => {
-      console.log('[Socket] Disconnected');
+    socket.on('disconnect', (reason) => {
+      console.log('[Socket] Disconnected:', reason);
+      joinedRef.current = false;
     });
 
-    return socket;
-  }, [sessionId, token, dispatch, navigate, onScorecardReady, onRecommendationsReady, onTerminated]);
-
-  useEffect(() => {
-    const socket = connect();
     return () => {
-      if (socket) {
+      console.log('[Socket] Cleaning up for session:', sessionId);
+      if (socket.connected) {
         socket.emit('leave:session', sessionId);
-        socket.disconnect();
       }
+      socket.removeAllListeners();
+      socket.disconnect();
+      socketRef.current = null;
+      joinedRef.current = false;
     };
-  }, [connect, sessionId]);
+  }, [sessionId, token, dispatch, navigate]);
 
   const disconnect = useCallback(() => {
     if (socketRef.current) {
-      socketRef.current.emit('leave:session', sessionId);
+      if (socketRef.current.connected) {
+        socketRef.current.emit('leave:session', sessionId);
+      }
       socketRef.current.disconnect();
       socketRef.current = null;
     }
