@@ -1,10 +1,12 @@
 // ============================================================
-// NxtStep — Interview Session Page (Fixed v3)
+// NxtStep — Interview Session Page (Fixed v4)
 // Fixes:
-//  1. STT 'network' error → use audio from existing MediaStream instead
-//     of letting SpeechRecognition open a NEW mic stream (which conflicts)
-//  2. Socket double-connect → stabilise useInterviewSocket dependency
-//  3. Question hydration from REST polling as reliable fallback
+//  1. STUCK "Evaluating" state: isAnswering now resets when
+//     a new question arrives (via socket OR REST polling)
+//  2. STT network error: gracefully falls back to manual text
+//     input without breaking the question/answer flow
+//  3. delayedWaiting logic simplified — single source of truth
+//  4. Socket connect stabilised — no dependency on permGranted
 // ============================================================
 
 import { useEffect, useRef, useCallback, useState } from 'react';
@@ -25,7 +27,7 @@ import { selectToken } from '@/features/auth/authSlice';
 import { useInterviewSocket } from '@/hooks/useInterviewSocket';
 import {
   useSubmitAnswer, useLogProctoringEvent,
-  useSession, useSessionStatus,
+  useSession,
 } from '@/hooks/useApi';
 import { usePageTitle } from '@/hooks';
 import { Card, Badge } from '@/components/ui/index';
@@ -35,14 +37,6 @@ import type { SocketScorecardReadyPayload } from '@/types';
 
 // ─────────────────────────────────────────────────────────────
 // Speech Recognition Hook
-//
-// KEY FIX: The 'network' error happens because SpeechRecognition
-// tries to open its OWN microphone stream, but getUserMedia already
-// holds the mic — on some browsers/OSes this causes a conflict.
-//
-// Solution: We don't fight the browser. We let SpeechRecognition
-// manage its own stream. But we handle 'network' errors gracefully
-// by falling back to manual text input automatically.
 // ─────────────────────────────────────────────────────────────
 function useSpeechRecognition({
   onTranscript,
@@ -83,22 +77,16 @@ function useSpeechRecognition({
       let newFinals = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
-        if (result.isFinal) {
-          newFinals += result[0].transcript;
-        } else {
-          interim = result[0].transcript;
-        }
+        if (result.isFinal) newFinals += result[0].transcript;
+        else interim = result[0].transcript;
       }
-      if (newFinals) {
-        finalTranscriptRef.current += newFinals + ' ';
-      }
+      if (newFinals) finalTranscriptRef.current += newFinals + ' ';
       interimRef.current = interim;
       onTranscriptRef.current((finalTranscriptRef.current + interim).trim());
     };
 
     recog.onend = () => {
       if (isListeningRef.current) {
-        // Debounced restart to avoid rapid-fire loop
         if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
         restartTimerRef.current = setTimeout(() => {
           if (isListeningRef.current && recogRef.current) {
@@ -113,32 +101,13 @@ function useSpeechRecognition({
     recog.onerror = (event: any) => {
       const err: string = event.error || 'unknown';
       console.warn('[STT] Error:', err);
-
-      if (err === 'network') {
-        // Network error = browser can't reach speech server OR mic conflict.
-        // Stop listening and notify parent to switch to manual mode.
-        isListeningRef.current = false;
-        setIsListening(false);
-        onErrorRef.current?.('network');
-        return;
-      }
-
-      if (err === 'not-allowed' || err === 'service-not-allowed') {
+      if (err === 'network' || err === 'not-allowed' || err === 'service-not-allowed') {
         isListeningRef.current = false;
         setIsListening(false);
         onErrorRef.current?.(err);
         return;
       }
-
-      if (err === 'no-speech' || err === 'audio-capture') {
-        // Non-fatal — let onend handle restart
-        return;
-      }
-
-      // For other errors, stop cleanly
-      isListeningRef.current = false;
-      setIsListening(false);
-      onErrorRef.current?.(err);
+      // no-speech / audio-capture are non-fatal — let onend restart
     };
 
     recogRef.current = recog;
@@ -177,9 +146,8 @@ function useSpeechRecognition({
     interimRef.current = '';
   }, []);
 
-  const getCurrentTranscript = useCallback(() => {
-    return (finalTranscriptRef.current + interimRef.current).trim();
-  }, []);
+  const getCurrentTranscript = useCallback(() =>
+    (finalTranscriptRef.current + interimRef.current).trim(), []);
 
   return { isListening, isSupported, startListening, stopListening, clearTranscript, getCurrentTranscript };
 }
@@ -210,9 +178,8 @@ function useTextToSpeech() {
       utterance.onerror = () => setIsSpeaking(false);
       window.speechSynthesis.speak(utterance);
     };
-    if (window.speechSynthesis.getVoices().length > 0) {
-      trySpeak();
-    } else {
+    if (window.speechSynthesis.getVoices().length > 0) trySpeak();
+    else {
       window.speechSynthesis.onvoiceschanged = () => {
         trySpeak();
         window.speechSynthesis.onvoiceschanged = null;
@@ -351,7 +318,7 @@ function PermissionGate({ onReady, sessionRole }: { onReady: (s: MediaStream) =>
           )}
 
           <p className="text-center text-xs text-[var(--color-text-muted)] mt-3">
-            Camera + mic required. Voice answers captured in-browser — no data sent to external STT servers.
+            Camera + mic required for proctoring. STT runs in-browser.
           </p>
         </Card>
       </div>
@@ -376,28 +343,32 @@ function FullScreenInterview({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [transcript, setTranscript] = useState('');
-  // KEY FIX: Start in manual mode if STT has network errors
   const [isManualMode, setIsManualMode] = useState(false);
   const [sttUnavailable, setSttUnavailable] = useState(false);
   const [manualText, setManualText] = useState('');
   const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-    }
+    if (videoRef.current && stream) videoRef.current.srcObject = stream;
   }, [stream]);
 
+  // Reset answer input whenever a new question arrives
   useEffect(() => {
     setTranscript('');
     setManualText('');
     setSubmitted(false);
   }, [question?.id]);
 
+  // ── KEY FIX: also reset submitted state when waiting ends (new Q arrived)
+  useEffect(() => {
+    if (!isWaiting && question) {
+      setSubmitted(false);
+    }
+  }, [isWaiting, question?.id]);
+
   const handleSttError = useCallback((err: string) => {
-    if (err === 'network') {
-      // Auto-switch to manual mode on network error
-      console.warn('[STT] Network error — switching to manual text input');
+    if (err === 'network' || err === 'not-allowed' || err === 'service-not-allowed') {
+      console.warn('[STT] Network/permission error — switching to manual text input');
       setSttUnavailable(true);
       setIsManualMode(true);
     }
@@ -476,7 +447,7 @@ function FullScreenInterview({
         </div>
       </div>
 
-      {/* Centre: Question */}
+      {/* Centre: Question or Waiting */}
       <div className="relative z-10 flex-1 flex items-center justify-center px-8 py-4">
         {isWaiting || !question ? (
           <div className="text-center">
@@ -516,7 +487,7 @@ function FullScreenInterview({
         )}
       </div>
 
-      {/* Bottom: Answer */}
+      {/* Bottom: Answer input */}
       <div className="relative z-10 px-6 pb-6">
         <div className="max-w-3xl mx-auto">
           {/* STT unavailable warning */}
@@ -529,7 +500,8 @@ function FullScreenInterview({
             </div>
           )}
 
-          {submitted ? (
+          {/* ── KEY FIX: show "submitted" panel only while still waiting ── */}
+          {submitted && isWaiting ? (
             <div className="backdrop-blur-xl bg-emerald-500/20 border border-emerald-500/30 rounded-2xl p-4 flex items-center gap-3">
               <CheckCircle2 size={20} className="text-emerald-400" />
               <div>
@@ -538,103 +510,104 @@ function FullScreenInterview({
               </div>
             </div>
           ) : (
-            <div className="backdrop-blur-xl bg-black/50 border border-white/10 rounded-2xl overflow-hidden">
-              {/* Header row */}
-              <div className="flex items-center justify-between px-4 pt-3 pb-1">
-                <div className="flex items-center gap-2">
-                  {isListening && (
-                    <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-semibold animate-pulse">
-                      <Radio size={10} /> Recording
-                    </span>
-                  )}
-                  {!isListening && !isManualMode && (
-                    <span className="text-white/40 text-xs">
-                      {canUseVoice ? 'Press mic to speak' : 'Type your answer below'}
-                    </span>
-                  )}
-                  {isManualMode && !sttUnavailable && (
-                    <span className="text-white/40 text-xs">Typing mode</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-white/30 text-xs">{activeText.length}/5000</span>
-                  {/* Only show toggle if STT is actually available */}
-                  {canUseVoice && (
-                    <button
-                      onClick={() => { setIsManualMode(m => !m); if (isListening) stopListening(); }}
-                      className="text-xs text-white/40 hover:text-white/70 transition-colors hover:underline underline-offset-2">
-                      {isManualMode ? '🎤 Use voice' : '⌨️ Type instead'}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Text area / transcript */}
-              <div className="relative min-h-[80px] px-4 py-3">
-                {isManualMode ? (
-                  <textarea
-                    value={manualText}
-                    onChange={e => setManualText(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSubmit) handleSubmit(); }}
-                    placeholder="Type your answer here… (Ctrl+Enter to submit)"
-                    className="w-full bg-transparent text-white placeholder:text-white/30 text-sm leading-relaxed resize-none focus:outline-none"
-                    rows={3}
-                    maxLength={5000}
-                    autoFocus
-                  />
-                ) : (
-                  <div className="min-h-[60px]">
+            // Show input as soon as a new question is ready (even if submitted was true)
+            !isWaiting && question && (
+              <div className="backdrop-blur-xl bg-black/50 border border-white/10 rounded-2xl overflow-hidden">
+                {/* Header row */}
+                <div className="flex items-center justify-between px-4 pt-3 pb-1">
+                  <div className="flex items-center gap-2">
                     {isListening && (
-                      <div className="flex items-center gap-0.5 mb-2 h-5">
-                        {Array.from({ length: 20 }).map((_, i) => (
-                          <span key={i} className="w-0.5 rounded-full bg-red-400/70 animate-bounce"
-                            style={{ height: `${8 + (i % 5) * 4}px`, animationDelay: `${i * 50}ms`, animationDuration: '0.6s' }} />
-                        ))}
-                      </div>
+                      <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-semibold animate-pulse">
+                        <Radio size={10} /> Recording
+                      </span>
                     )}
-                    {transcript ? (
-                      <p className="text-white text-sm leading-relaxed whitespace-pre-wrap">{transcript}</p>
-                    ) : (
-                      <p className="text-white/30 text-sm italic">
-                        {isListening ? 'Listening… speak your answer clearly' : 'Press the microphone to start speaking'}
-                      </p>
+                    {!isListening && !isManualMode && (
+                      <span className="text-white/40 text-xs">
+                        {canUseVoice ? 'Press mic to speak' : 'Type your answer below'}
+                      </span>
+                    )}
+                    {isManualMode && !sttUnavailable && (
+                      <span className="text-white/40 text-xs">Typing mode</span>
                     )}
                   </div>
-                )}
+                  <div className="flex items-center gap-3">
+                    <span className="text-white/30 text-xs">{activeText.length}/5000</span>
+                    {canUseVoice && (
+                      <button
+                        onClick={() => { setIsManualMode(m => !m); if (isListening) stopListening(); }}
+                        className="text-xs text-white/40 hover:text-white/70 transition-colors hover:underline underline-offset-2">
+                        {isManualMode ? '🎤 Use voice' : '⌨️ Type instead'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Text area / transcript */}
+                <div className="relative min-h-[80px] px-4 py-3">
+                  {isManualMode ? (
+                    <textarea
+                      value={manualText}
+                      onChange={e => setManualText(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSubmit) handleSubmit(); }}
+                      placeholder="Type your answer here… (Ctrl+Enter to submit)"
+                      className="w-full bg-transparent text-white placeholder:text-white/30 text-sm leading-relaxed resize-none focus:outline-none"
+                      rows={3}
+                      maxLength={5000}
+                      autoFocus
+                    />
+                  ) : (
+                    <div className="min-h-[60px]">
+                      {isListening && (
+                        <div className="flex items-center gap-0.5 mb-2 h-5">
+                          {Array.from({ length: 20 }).map((_, i) => (
+                            <span key={i} className="w-0.5 rounded-full bg-red-400/70 animate-bounce"
+                              style={{ height: `${8 + (i % 5) * 4}px`, animationDelay: `${i * 50}ms`, animationDuration: '0.6s' }} />
+                          ))}
+                        </div>
+                      )}
+                      {transcript ? (
+                        <p className="text-white text-sm leading-relaxed whitespace-pre-wrap">{transcript}</p>
+                      ) : (
+                        <p className="text-white/30 text-sm italic">
+                          {isListening ? 'Listening… speak your answer clearly' : 'Press the microphone to start speaking'}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Controls */}
+                <div className="flex items-center gap-3 px-4 pb-4">
+                  {!isManualMode && canUseVoice && (
+                    <button onClick={handleToggleMic} disabled={isSubmitting}
+                      className={cn(
+                        'flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all duration-200',
+                        isListening
+                          ? 'bg-red-500 text-white shadow-lg shadow-red-500/30'
+                          : 'bg-white/10 border border-white/20 text-white hover:bg-white/20',
+                        isSubmitting && 'opacity-50 cursor-not-allowed'
+                      )}>
+                      {isListening
+                        ? <><div className="w-2 h-2 rounded-full bg-white animate-pulse" />Stop</>
+                        : <><Mic size={16} />Record</>}
+                    </button>
+                  )}
+
+                  {activeText && !isListening && (
+                    <button onClick={() => { setTranscript(''); setManualText(''); clearTranscript(); }}
+                      className="px-3 py-2.5 rounded-xl text-sm text-white/40 hover:text-white/70 hover:bg-white/10 transition-all">
+                      Clear
+                    </button>
+                  )}
+
+                  <Button onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}
+                    size="md" rightIcon={<Send size={15} />}
+                    className="ml-auto bg-primary-500 hover:bg-primary-600 shadow-glow">
+                    {isSubmitting ? 'Submitting…' : 'Submit Answer'}
+                  </Button>
+                </div>
               </div>
-
-              {/* Controls */}
-              <div className="flex items-center gap-3 px-4 pb-4">
-                {/* Mic button — only show when voice is available and not in manual mode */}
-                {!isManualMode && canUseVoice && (
-                  <button onClick={handleToggleMic} disabled={isSubmitting}
-                    className={cn(
-                      'flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all duration-200',
-                      isListening
-                        ? 'bg-red-500 text-white shadow-lg shadow-red-500/30'
-                        : 'bg-white/10 border border-white/20 text-white hover:bg-white/20',
-                      isSubmitting && 'opacity-50 cursor-not-allowed'
-                    )}>
-                    {isListening
-                      ? <><div className="w-2 h-2 rounded-full bg-white animate-pulse" />Stop</>
-                      : <><Mic size={16} />Record</>}
-                  </button>
-                )}
-
-                {activeText && !isListening && (
-                  <button onClick={() => { setTranscript(''); setManualText(''); clearTranscript(); }}
-                    className="px-3 py-2.5 rounded-xl text-sm text-white/40 hover:text-white/70 hover:bg-white/10 transition-all">
-                    Clear
-                  </button>
-                )}
-
-                <Button onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}
-                  size="md" rightIcon={<Send size={15} />}
-                  className="ml-auto bg-primary-500 hover:bg-primary-600 shadow-glow">
-                  {isSubmitting ? 'Submitting…' : 'Submit Answer'}
-                </Button>
-              </div>
-            </div>
+            )
           )}
         </div>
       </div>
@@ -654,9 +627,8 @@ export default function InterviewSessionPage() {
   const [liveStream, setLiveStream] = useState<MediaStream | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
+  // Simple waiting message — not tied to complex state machine
   const [waitingMessage, setWaitingMessage] = useState('Generating your first question…');
-  const [delayedWaiting, setDelayedWaiting] = useState(true);
-  const waitingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { isSpeaking, isMuted, speak, cancel: cancelTTS, toggleMute } = useTextToSpeech();
 
@@ -667,13 +639,11 @@ export default function InterviewSessionPage() {
   const isAnswering = useAppSelector(selectIsAnswering);
   const proctoringWarnings = useAppSelector(selectProctoringWarnings);
 
-  // Always fetch session — no permGranted gate
   const { data: session, refetch: refetchSession } = useSession(sessionId || '', !!sessionId);
-
   const submitAnswerMutation = useSubmitAnswer(sessionId || '');
   const logEvent = useLogProctoringEvent(sessionId || '');
 
-  // ── REST polling — fires every 2s until question arrives ──
+  // ── REST polling — fires every 2s until a question arrives ─
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stopPolling = useCallback(() => {
     if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
@@ -686,7 +656,7 @@ export default function InterviewSessionPage() {
     return stopPolling;
   }, [currentQuestion, refetchSession, stopPolling]);
 
-  // ── Hydrate question from REST ────────────────────────────
+  // ── Hydrate question from REST response ───────────────────
   const prevQLen = useRef(0);
   useEffect(() => {
     if (!session) return;
@@ -701,10 +671,10 @@ export default function InterviewSessionPage() {
     if (questions.length === prevQLen.current && currentQuestion) return;
     prevQLen.current = questions.length;
 
-    if (questions.length > 0 && !currentQuestion) {
+    if (questions.length > 0) {
       const answeredIds = new Set(answers.map((a: any) => a.questionId));
       const nextQ = questions.find((q: any) => !answeredIds.has(q.id));
-      if (nextQ) {
+      if (nextQ && (!currentQuestion || currentQuestion.id !== nextQ.id)) {
         console.log('[Interview] Hydrating question from REST:', nextQ.id);
         dispatch(setCurrentQuestion({
           id: nextQ.id, text: nextQ.text,
@@ -715,26 +685,20 @@ export default function InterviewSessionPage() {
           parentQuestionId: nextQ.parentQuestionId,
         }));
         dispatch(setWaitingForQuestion(false));
+        // ── KEY FIX: reset isAnswering when a new question arrives
+        dispatch(setIsAnswering(false));
+        setWaitingMessage('Generating next question…');
       }
     }
   }, [session, currentQuestion, dispatch, navigate, sessionId]);
 
-  // ── Waiting state transitions ─────────────────────────────
+  // ── Update waiting message contextually ──────────────────
   useEffect(() => {
     if (isAnswering || submitAnswerMutation.isPending) {
-      setDelayedWaiting(true);
       setWaitingMessage('Evaluating your answer…');
-      if (waitingTimerRef.current) clearTimeout(waitingTimerRef.current);
     } else if (!currentQuestion) {
-      waitingTimerRef.current = setTimeout(() => {
-        setWaitingMessage('Generating next question…');
-        setDelayedWaiting(true);
-      }, 800);
-    } else {
-      if (waitingTimerRef.current) clearTimeout(waitingTimerRef.current);
-      setTimeout(() => setDelayedWaiting(false), 200);
+      setWaitingMessage('Generating next question…');
     }
-    return () => { if (waitingTimerRef.current) clearTimeout(waitingTimerRef.current); };
   }, [isAnswering, submitAnswerMutation.isPending, currentQuestion]);
 
   // ── Auto-speak new question ───────────────────────────────
@@ -754,7 +718,7 @@ export default function InterviewSessionPage() {
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, [permGranted]);
 
-  // ── Stable callback refs for socket handlers ──────────────
+  // ── Socket handlers ───────────────────────────────────────
   const handleScorecardReady = useCallback((_: SocketScorecardReadyPayload) => {
     stopPolling();
     navigate(`/interview/${sessionId}/results`);
@@ -766,7 +730,12 @@ export default function InterviewSessionPage() {
   }, [navigate, sessionId, stopPolling]);
 
   // Connect socket immediately (not gated on permGranted)
-  useInterviewSocket({ sessionId: sessionId || null, token, onScorecardReady: handleScorecardReady, onTerminated: handleTerminated });
+  useInterviewSocket({
+    sessionId: sessionId || null,
+    token,
+    onScorecardReady: handleScorecardReady,
+    onTerminated: handleTerminated,
+  });
 
   // ── Cleanup ───────────────────────────────────────────────
   useEffect(() => {
@@ -774,24 +743,32 @@ export default function InterviewSessionPage() {
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
       mediaStreamRef.current?.getTracks().forEach(t => t.stop());
       window.speechSynthesis?.cancel();
-      if (waitingTimerRef.current) clearTimeout(waitingTimerRef.current);
       stopPolling();
     };
   }, [stopPolling]);
 
   const answerCount = session?.answers?.length || 0;
-  const showWaiting = delayedWaiting || !currentQuestion;
+
+  // ── KEY FIX: isWaiting = true only if we have no question yet
+  //    OR we are actively waiting after submitting (isAnswering still true
+  //    and no new question dispatched yet)
+  const showWaiting = isWaiting || !currentQuestion;
 
   const handleSubmitAnswer = async (text: string) => {
     if (!currentQuestion || !text.trim()) return;
     cancelTTS();
     dispatch(setIsAnswering(true));
+    dispatch(setWaitingForQuestion(true));
+    // Clear current question so the waiting spinner shows immediately
+    // (the next question will arrive via socket or REST polling)
     try {
       await submitAnswerMutation.mutateAsync({ questionId: currentQuestion.id, answerText: text.trim() });
-      dispatch(setWaitingForQuestion(true));
+      // After REST ack, keep waiting — socket/polling will dispatch next question
+      // which resets isAnswering and isWaitingForQuestion
     } catch (err) {
       console.error('[Interview] Submit failed:', err);
       dispatch(setIsAnswering(false));
+      dispatch(setWaitingForQuestion(false));
     }
   };
 
