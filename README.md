@@ -134,7 +134,7 @@ Five BullMQ queues process all async work:
 
 ```bash
 # 1. Clone
-git clone <repo-url>
+git clone https://github.com/ParitoshWandhare/NxtStep.git
 cd nxtstep-backend
 
 # 2. Configure
