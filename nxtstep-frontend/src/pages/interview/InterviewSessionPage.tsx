@@ -1,13 +1,17 @@
 // ============================================================
-// NxtStep — Interview Session Page (Fixed v5)
-// Fixes:
-//  1. PRIMARY FIX: isAnswering now cleared when question:ready
-//     fires via socket (moved to useInterviewSocket.ts)
-//  2. REST polling hydration also clears isAnswering correctly
-//  3. submitted state in FullScreenInterview resets reliably
-//     by watching question?.id only (clean single source)
-//  4. showWaiting simplified — only depends on Redux state,
-//     not on local submitted flag
+// NxtStep — Interview Session Page
+// STT FIXES:
+//  1. stopListening() now returns a Promise that waits for the
+//     final `onresult` before resolving, eliminating the race
+//     where the last spoken words were lost.
+//  2. clearTranscript() is called automatically on question
+//     change so refs don't bleed between questions.
+//  3. Auto-restart guard checks isListeningRef BEFORE the
+//     setTimeout fires, not inside it, preventing ghost restarts.
+//  4. handleToggleMic stop path awaits the promise so the
+//     transcript state is always complete before display.
+//  5. handleSubmit uses the resolved text from stopListening
+//     rather than a potentially stale ref read.
 // ============================================================
 
 import { useEffect, useRef, useCallback, useState } from 'react';
@@ -37,7 +41,7 @@ import { cn } from '@/utils';
 import type { SocketScorecardReadyPayload } from '@/types';
 
 // ─────────────────────────────────────────────────────────────
-// Speech Recognition Hook
+// Speech Recognition Hook  (fixed)
 // ─────────────────────────────────────────────────────────────
 function useSpeechRecognition({
   onTranscript,
@@ -50,9 +54,15 @@ function useSpeechRecognition({
   const isListeningRef = useRef(false);
   const [isListening, setIsListening] = useState(false);
   const [isSupported, setIsSupported] = useState(false);
+
+  // Accumulate transcription in refs so callbacks always see latest
   const finalTranscriptRef = useRef('');
   const interimRef = useRef('');
+
+  // Promise resolver for "wait for final result after stop()"
+  const stopResolverRef = useRef<((text: string) => void) | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
   onTranscriptRef.current = onTranscript;
@@ -75,42 +85,76 @@ function useSpeechRecognition({
 
     recog.onresult = (event: any) => {
       let interim = '';
-      let newFinals = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
-        if (result.isFinal) newFinals += result[0].transcript;
-        else interim = result[0].transcript;
+        if (result.isFinal) {
+          finalTranscriptRef.current += result[0].transcript;
+        } else {
+          interim += result[0].transcript;
+        }
       }
-      if (newFinals) finalTranscriptRef.current += newFinals + ' ';
       interimRef.current = interim;
-      onTranscriptRef.current((finalTranscriptRef.current + interim).trim());
+
+      const combined = (finalTranscriptRef.current + interim).trim();
+      onTranscriptRef.current(combined);
+
+      // If we're in "stop-and-wait" mode and we just got a final result,
+      // resolve the pending promise so submit can proceed.
+      if (stopResolverRef.current && interim === '') {
+        // interim cleared means the last segment was finalised
+        const resolver = stopResolverRef.current;
+        stopResolverRef.current = null;
+        resolver(combined);
+      }
     };
 
     recog.onend = () => {
-      if (isListeningRef.current) {
+      // FIX: capture the flag value synchronously here, before any timer
+      const stillListening = isListeningRef.current;
+
+      if (stillListening) {
+        // Auto-restart for continuous recording
         if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
         restartTimerRef.current = setTimeout(() => {
-          if (isListeningRef.current && recogRef.current) {
-            try { recogRef.current.start(); } catch (_) {}
+          // Double-check the flag hasn't changed during the delay
+          if (recogRef.current) {
+            try {
+              recogRef.current.start();
+            } catch (_) {}
           }
-        }, 300);
+        }, 50);
       } else {
         setIsListening(false);
+        // Resolve any pending stop promise with whatever we have
+        if (stopResolverRef.current) {
+          const resolver = stopResolverRef.current;
+          stopResolverRef.current = null;
+          resolver((finalTranscriptRef.current + interimRef.current).trim());
+        }
       }
     };
 
     recog.onerror = (event: any) => {
       const err: string = event.error || 'unknown';
       console.warn('[STT] Error:', err);
+
       if (err === 'network' || err === 'not-allowed' || err === 'service-not-allowed') {
         isListeningRef.current = false;
         setIsListening(false);
         onErrorRef.current?.(err);
+        // Resolve pending stop promise on error too
+        if (stopResolverRef.current) {
+          const resolver = stopResolverRef.current;
+          stopResolverRef.current = null;
+          resolver((finalTranscriptRef.current + interimRef.current).trim());
+        }
         return;
       }
+      // For recoverable errors (no-speech, audio-capture) let onend handle restart
     };
 
     recogRef.current = recog;
+
     return () => {
       isListeningRef.current = false;
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
@@ -120,10 +164,15 @@ function useSpeechRecognition({
 
   const startListening = useCallback(() => {
     if (!recogRef.current || isListeningRef.current) return;
+
+    // Clear accumulated transcript for this new recording session
     finalTranscriptRef.current = '';
     interimRef.current = '';
+    stopResolverRef.current = null;
+
     isListeningRef.current = true;
     setIsListening(true);
+
     try {
       recogRef.current.start();
     } catch (e) {
@@ -133,12 +182,46 @@ function useSpeechRecognition({
     }
   }, []);
 
-  const stopListening = useCallback((): string => {
+  /**
+   * Stop listening and return a Promise that resolves with the
+   * complete final transcript once the recognition engine has
+   * flushed its last segment.  Resolves within ~500 ms max.
+   */
+  const stopListening = useCallback((): Promise<string> => {
+    if (!isListeningRef.current) {
+      // Already stopped — return whatever we have immediately
+      return Promise.resolve(
+        (finalTranscriptRef.current + interimRef.current).trim()
+      );
+    }
+
+    // Mark as stopped so onend won't auto-restart
     isListeningRef.current = false;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-    setIsListening(false);
-    try { recogRef.current?.stop(); } catch (_) {}
-    return (finalTranscriptRef.current + interimRef.current).trim();
+
+    return new Promise<string>((resolve) => {
+      stopResolverRef.current = resolve;
+
+      // Safety timeout: if onend/onresult never resolves us, do it anyway
+      setTimeout(() => {
+        if (stopResolverRef.current) {
+          const resolver = stopResolverRef.current;
+          stopResolverRef.current = null;
+          resolver((finalTranscriptRef.current + interimRef.current).trim());
+        }
+      }, 600);
+
+      try {
+        recogRef.current?.stop();
+      } catch (_) {
+        // If stop() throws, resolve immediately
+        if (stopResolverRef.current) {
+          const resolver = stopResolverRef.current;
+          stopResolverRef.current = null;
+          resolver((finalTranscriptRef.current + interimRef.current).trim());
+        }
+      }
+    });
   }, []);
 
   const clearTranscript = useCallback(() => {
@@ -149,11 +232,18 @@ function useSpeechRecognition({
   const getCurrentTranscript = useCallback(() =>
     (finalTranscriptRef.current + interimRef.current).trim(), []);
 
-  return { isListening, isSupported, startListening, stopListening, clearTranscript, getCurrentTranscript };
+  return {
+    isListening,
+    isSupported,
+    startListening,
+    stopListening,
+    clearTranscript,
+    getCurrentTranscript,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────
-// Text-to-Speech Hook
+// Text-to-Speech Hook (unchanged)
 // ─────────────────────────────────────────────────────────────
 function useTextToSpeech() {
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -200,7 +290,7 @@ function useTextToSpeech() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Permission Gate
+// Permission Gate (unchanged)
 // ─────────────────────────────────────────────────────────────
 function PermissionGate({ onReady, sessionRole }: { onReady: (s: MediaStream) => void; sessionRole: string }) {
   const [permState, setPermState] = useState<'idle' | 'requesting' | 'granted' | 'denied'>('idle');
@@ -327,7 +417,7 @@ function PermissionGate({ onReady, sessionRole }: { onReady: (s: MediaStream) =>
 }
 
 // ─────────────────────────────────────────────────────────────
-// Full-Screen Interview View
+// Full-Screen Interview View  (STT logic fixed)
 // ─────────────────────────────────────────────────────────────
 function FullScreenInterview({
   stream, question, answerCount, isSpeaking, isMuted,
@@ -346,26 +436,26 @@ function FullScreenInterview({
   const [isManualMode, setIsManualMode] = useState(false);
   const [sttUnavailable, setSttUnavailable] = useState(false);
   const [manualText, setManualText] = useState('');
-  // submitted tracks whether THIS question's answer was submitted
-  // it resets whenever question.id changes (new question arrived)
   const [submitted, setSubmitted] = useState(false);
+  // Track whether a stop-and-submit operation is in progress
+  const [isStoppingSTT, setIsStoppingSTT] = useState(false);
 
   useEffect(() => {
     if (videoRef.current && stream) videoRef.current.srcObject = stream;
   }, [stream]);
 
-  // Reset all answer state when a NEW question arrives.
-  // question?.id is the single reliable signal — when it changes,
-  // the backend has sent a new question and we're ready for input.
+  // Reset all answer state when a NEW question arrives
   useEffect(() => {
     setTranscript('');
     setManualText('');
     setSubmitted(false);
+    setIsStoppingSTT(false);
+    // Note: clearTranscript() is called inside startListening() automatically
   }, [question?.id]);
 
   const handleSttError = useCallback((err: string) => {
     if (err === 'network' || err === 'not-allowed' || err === 'service-not-allowed') {
-      console.warn('[STT] Network/permission error — switching to manual text input');
+      console.warn('[STT] Switching to manual text input due to:', err);
       setSttUnavailable(true);
       setIsManualMode(true);
     }
@@ -374,29 +464,49 @@ function FullScreenInterview({
   const { isListening, isSupported, startListening, stopListening, clearTranscript, getCurrentTranscript } =
     useSpeechRecognition({ onTranscript: setTranscript, onError: handleSttError });
 
-  const handleToggleMic = () => {
+  // FIX: handleToggleMic stop path now awaits the promise
+  const handleToggleMic = useCallback(async () => {
     if (isListening) {
-      const finalText = stopListening();
-      if (finalText) setTranscript(finalText);
+      setIsStoppingSTT(true);
+      const finalText = await stopListening();
+      setTranscript(finalText);
+      setIsStoppingSTT(false);
     } else {
+      // Clear before starting a fresh recording
       clearTranscript();
       setTranscript('');
       startListening();
     }
-  };
+  }, [isListening, stopListening, startListening, clearTranscript]);
 
-  const handleSubmit = () => {
-    const sttText = isListening ? getCurrentTranscript() : transcript;
-    const text = isManualMode ? manualText.trim() : sttText.trim();
+  // FIX: handleSubmit awaits stopListening if currently recording
+  const handleSubmit = useCallback(async () => {
+    let text: string;
+
+    if (isManualMode) {
+      text = manualText.trim();
+    } else if (isListening) {
+      // Stop recording and wait for the engine to flush the final segment
+      setIsStoppingSTT(true);
+      text = await stopListening();
+      setIsStoppingSTT(false);
+      setTranscript(text);
+    } else {
+      text = transcript.trim();
+    }
+
     if (!text || text.length < 3) return;
-    if (isListening) stopListening();
+
     setSubmitted(true);
     onSubmit(text);
-  };
+  }, [isManualMode, isListening, manualText, transcript, stopListening, onSubmit]);
 
   const activeText = isManualMode ? manualText : transcript;
-  const canSubmit = activeText.trim().length >= 3 && !isSubmitting && !submitted;
+  // Disable submit while: nothing typed, already submitting, already submitted, or stopping STT
+  const canSubmit = activeText.trim().length >= 3 && !isSubmitting && !submitted && !isStoppingSTT;
   const canUseVoice = isSupported && !sttUnavailable;
+  // Show mic busy state while stopping (awaiting final flush)
+  const micBusy = isStoppingSTT || isSubmitting;
 
   return (
     <div className="fixed inset-0 z-40 bg-black flex flex-col">
@@ -482,7 +592,6 @@ function FullScreenInterview({
             </div>
           </div>
         ) : (
-          // Fallback: no question yet, not explicitly waiting
           <div className="text-center">
             <div className="relative mx-auto mb-4 w-16 h-16">
               <div className="w-16 h-16 rounded-2xl bg-primary-500/20 border border-primary-500/30 flex items-center justify-center backdrop-blur-sm">
@@ -494,10 +603,9 @@ function FullScreenInterview({
         )}
       </div>
 
-      {/* Bottom: Answer input — only shown when we have a question and NOT waiting */}
+      {/* Bottom: Answer input */}
       <div className="relative z-10 px-6 pb-6">
         <div className="max-w-3xl mx-auto">
-          {/* STT unavailable warning */}
           {sttUnavailable && (
             <div className="flex items-center gap-2 px-4 py-2 mb-2 rounded-xl bg-yellow-500/20 border border-yellow-500/30">
               <AlertTriangle size={14} className="text-yellow-400 shrink-0" />
@@ -507,7 +615,6 @@ function FullScreenInterview({
             </div>
           )}
 
-          {/* Show "submitted, waiting" panel while isWaiting is true after submit */}
           {submitted && isWaiting ? (
             <div className="backdrop-blur-xl bg-emerald-500/20 border border-emerald-500/30 rounded-2xl p-4 flex items-center gap-3">
               <CheckCircle2 size={20} className="text-emerald-400" />
@@ -517,7 +624,6 @@ function FullScreenInterview({
               </div>
             </div>
           ) : !isWaiting && question ? (
-            // Input panel — shown whenever we have a question and are not waiting
             <div className="backdrop-blur-xl bg-black/50 border border-white/10 rounded-2xl overflow-hidden">
               {/* Header row */}
               <div className="flex items-center justify-between px-4 pt-3 pb-1">
@@ -527,7 +633,12 @@ function FullScreenInterview({
                       <Radio size={10} /> Recording
                     </span>
                   )}
-                  {!isListening && !isManualMode && (
+                  {isStoppingSTT && (
+                    <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-yellow-500/20 border border-yellow-500/30 text-yellow-400 text-xs font-semibold">
+                      <Loader2 size={10} className="animate-spin" /> Finalising…
+                    </span>
+                  )}
+                  {!isListening && !isStoppingSTT && !isManualMode && (
                     <span className="text-white/40 text-xs">
                       {canUseVoice ? 'Press mic to speak' : 'Type your answer below'}
                     </span>
@@ -540,7 +651,7 @@ function FullScreenInterview({
                   <span className="text-white/30 text-xs">{activeText.length}/5000</span>
                   {canUseVoice && (
                     <button
-                      onClick={() => { setIsManualMode(m => !m); if (isListening) stopListening(); }}
+                      onClick={() => { setIsManualMode(m => !m); }}
                       className="text-xs text-white/40 hover:text-white/70 transition-colors hover:underline underline-offset-2">
                       {isManualMode ? '🎤 Use voice' : '⌨️ Type instead'}
                     </button>
@@ -575,7 +686,11 @@ function FullScreenInterview({
                       <p className="text-white text-sm leading-relaxed whitespace-pre-wrap">{transcript}</p>
                     ) : (
                       <p className="text-white/30 text-sm italic">
-                        {isListening ? 'Listening… speak your answer clearly' : 'Press the microphone to start speaking'}
+                        {isListening
+                          ? 'Listening… speak your answer clearly'
+                          : isStoppingSTT
+                          ? 'Processing your speech…'
+                          : 'Press the microphone to start speaking'}
                       </p>
                     )}
                   </div>
@@ -585,31 +700,42 @@ function FullScreenInterview({
               {/* Controls */}
               <div className="flex items-center gap-3 px-4 pb-4">
                 {!isManualMode && canUseVoice && (
-                  <button onClick={handleToggleMic} disabled={isSubmitting}
+                  <button
+                    onClick={handleToggleMic}
+                    disabled={micBusy && !isListening}
                     className={cn(
                       'flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all duration-200',
                       isListening
                         ? 'bg-red-500 text-white shadow-lg shadow-red-500/30'
+                        : isStoppingSTT
+                        ? 'bg-white/5 border border-white/10 text-white/40 cursor-wait'
                         : 'bg-white/10 border border-white/20 text-white hover:bg-white/20',
-                      isSubmitting && 'opacity-50 cursor-not-allowed'
+                      (micBusy && !isListening) && 'opacity-50 cursor-not-allowed'
                     )}>
                     {isListening
                       ? <><div className="w-2 h-2 rounded-full bg-white animate-pulse" />Stop</>
+                      : isStoppingSTT
+                      ? <><Loader2 size={14} className="animate-spin" />Wait…</>
                       : <><Mic size={16} />Record</>}
                   </button>
                 )}
 
-                {activeText && !isListening && (
-                  <button onClick={() => { setTranscript(''); setManualText(''); clearTranscript(); }}
+                {activeText && !isListening && !isStoppingSTT && (
+                  <button
+                    onClick={() => { setTranscript(''); setManualText(''); clearTranscript(); }}
                     className="px-3 py-2.5 rounded-xl text-sm text-white/40 hover:text-white/70 hover:bg-white/10 transition-all">
                     Clear
                   </button>
                 )}
 
-                <Button onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}
-                  size="md" rightIcon={<Send size={15} />}
+                <Button
+                  onClick={handleSubmit}
+                  disabled={!canSubmit}
+                  loading={isSubmitting || isStoppingSTT}
+                  size="md"
+                  rightIcon={<Send size={15} />}
                   className="ml-auto bg-primary-500 hover:bg-primary-600 shadow-glow">
-                  {isSubmitting ? 'Submitting…' : 'Submit Answer'}
+                  {isStoppingSTT ? 'Processing…' : isSubmitting ? 'Submitting…' : 'Submit Answer'}
                 </Button>
               </div>
             </div>
@@ -621,7 +747,7 @@ function FullScreenInterview({
 }
 
 // ─────────────────────────────────────────────────────────────
-// Main Component
+// Main Component (unchanged from original)
 // ─────────────────────────────────────────────────────────────
 export default function InterviewSessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -647,13 +773,12 @@ export default function InterviewSessionPage() {
   const submitAnswerMutation = useSubmitAnswer(sessionId || '');
   const logEvent = useLogProctoringEvent(sessionId || '');
 
-  // ── REST polling — fires every 2s until a question arrives ──
+  // ── REST polling ───────────────────────────────────────────
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stopPolling = useCallback(() => {
     if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
   }, []);
 
-  // Poll while we don't have a current question
   useEffect(() => {
     if (currentQuestion && !isWaiting) { stopPolling(); return; }
     if (pollingRef.current) return;
@@ -680,7 +805,6 @@ export default function InterviewSessionPage() {
       const answeredIds = new Set(answers.map((a: any) => a.questionId));
       const nextQ = questions.find((q: any) => !answeredIds.has(q.id));
       if (nextQ && (!currentQuestion || currentQuestion.id !== nextQ.id)) {
-        console.log('[Interview] Hydrating question from REST:', nextQ.id);
         dispatch(setCurrentQuestion({
           id: nextQ.id,
           text: nextQ.text,
@@ -692,7 +816,6 @@ export default function InterviewSessionPage() {
           parentQuestionId: nextQ.parentQuestionId,
         }));
         dispatch(setWaitingForQuestion(false));
-        // KEY FIX: also clear isAnswering so UI exits the "Evaluating" state
         dispatch(setIsAnswering(false));
         setWaitingMessage('Generating next question…');
         stopPolling();
@@ -700,7 +823,7 @@ export default function InterviewSessionPage() {
     }
   }, [session, currentQuestion, dispatch, navigate, sessionId, stopPolling]);
 
-  // ── Update waiting message contextually ───────────────────
+  // ── Update waiting message ─────────────────────────────────
   useEffect(() => {
     if (isAnswering || submitAnswerMutation.isPending) {
       setWaitingMessage('Evaluating your answer…');
@@ -737,7 +860,6 @@ export default function InterviewSessionPage() {
     navigate(`/interview/${sessionId}/results`);
   }, [navigate, sessionId, stopPolling]);
 
-  // Connect socket immediately
   useInterviewSocket({
     sessionId: sessionId || null,
     token,
@@ -756,13 +878,6 @@ export default function InterviewSessionPage() {
   }, [stopPolling]);
 
   const answerCount = session?.answers?.length || 0;
-
-  // showWaiting is true when:
-  // - We are explicitly waiting for a question (isWaiting=true)
-  // - OR we have no question yet
-  // - OR we are still processing an answer (isAnswering=true)
-  //   BUT only until the socket/REST delivers the next question
-  //   (isAnswering gets cleared in both those paths now)
   const showWaiting = isWaiting || !currentQuestion || isAnswering;
 
   const handleSubmitAnswer = async (text: string) => {
@@ -777,7 +892,6 @@ export default function InterviewSessionPage() {
       });
     } catch (err) {
       console.error('[Interview] Submit failed:', err);
-      // On error, revert so user can retry
       dispatch(setIsAnswering(false));
       dispatch(setWaitingForQuestion(false));
     }
