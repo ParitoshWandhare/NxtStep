@@ -1,9 +1,8 @@
 // ============================================================
-// NxtStep — useInterviewSocket Hook (Fixed)
-// Fix: Socket connects immediately when sessionId + token available.
-// Previously the component gated this on permGranted, causing
-// question:ready events to be missed. Now connects right away
-// and the REST polling in the page handles any missed questions.
+// NxtStep — useInterviewSocket Hook (Fixed v5)
+// Fix: Added setIsAnswering(false) in question:ready handler.
+// Previously isAnswering stayed true after submitting, so even
+// when the next question arrived the UI stayed on "Evaluating".
 // ============================================================
 
 import { useEffect, useRef, useCallback } from 'react';
@@ -13,6 +12,7 @@ import {
   setCurrentQuestion,
   addEvaluationResult,
   setWaitingForQuestion,
+  setIsAnswering,
   endSession,
 } from '@/features/interview/interviewSlice';
 import type {
@@ -97,6 +97,9 @@ export function useInterviewSocket({
     });
 
     // ── question:ready ──────────────────────────────────────
+    // KEY FIX: dispatch setIsAnswering(false) here so the UI
+    // transitions out of the "Evaluating..." waiting state
+    // as soon as the next question is available.
     socket.on('question:ready', (payload: SocketQuestionReadyPayload) => {
       console.log('[Socket] question:ready received:', payload.id);
       const question: Question = {
@@ -111,6 +114,7 @@ export function useInterviewSocket({
       };
       dispatch(setCurrentQuestion(question));
       dispatch(setWaitingForQuestion(false));
+      dispatch(setIsAnswering(false)); // ← THE FIX: clear answering state
     });
 
     // ── evaluation:complete ─────────────────────────────────
@@ -127,6 +131,9 @@ export function useInterviewSocket({
         },
       };
       dispatch(addEvaluationResult(result));
+      // Keep isWaitingForQuestion = true here — the next question
+      // hasn't arrived yet. setIsAnswering(false) will be dispatched
+      // when question:ready fires.
       dispatch(setWaitingForQuestion(true));
     });
 

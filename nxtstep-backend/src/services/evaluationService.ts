@@ -1,9 +1,11 @@
 // ============================================================
 // NxtStep — Evaluation Service
-// BUG FIX: Evaluation.create() was missing `answerText` field,
-// causing Mongoose ValidationError: "answerText is required".
-// The answerText is passed in as a parameter — it just wasn't
-// being forwarded into the create() call.
+// FIX 1: Evaluation.create() was missing `answerText` field.
+// FIX 2: After the final answer (answersCount >= MAX_QUESTIONS),
+//        enqueue GenerateScorecard job so the scorecard is
+//        actually produced. Previously the session was marked
+//        'completed' but addGenerateScorecardJob was never called
+//        from this code path, leaving the scorecard 404 forever.
 // ============================================================
 
 import crypto from 'crypto';
@@ -11,7 +13,8 @@ import { aiAdapter, AIMessage } from '../ai/aiAdapter';
 import { buildEvaluationPrompt } from '../ai/prompts';
 import { Evaluation } from '../models/Evaluation';
 import { InterviewSession } from '../models/InterviewSession';
-import { addGenerateQuestionJob } from '../queues';
+import { addGenerateQuestionJob, addGenerateScorecardJob } from '../queues';
+import { emitEvaluationComplete } from '../sockets/index';
 import { safeRedisDel } from '../config/redis';
 import { logger } from '../utils/logger';
 import { env } from '../config/env';
@@ -33,13 +36,13 @@ export interface EvalResult {
   overall: number;
 }
 
-// ── Evaluate a single answer ─────────────────────────────────
+// ── Evaluate a single answer ──────────────────────────────────
 export const evaluateAnswer = async (
   sessionId: string,
   questionId: string,
   userId: string,
   questionText: string,
-  answerText: string,        // ← was already a param, just not forwarded to create()
+  answerText: string,
   topic: string,
   difficulty: 'junior' | 'mid' | 'senior',
   questionIndex: number,
@@ -70,18 +73,18 @@ export const evaluateAnswer = async (
 
   // Compute weighted overall
   const w = {
-    technical:    env.SCORE_WEIGHT_TECHNICAL,
+    technical:      env.SCORE_WEIGHT_TECHNICAL,
     problemSolving: env.SCORE_WEIGHT_PROBLEM_SOLVING,
-    communication: env.SCORE_WEIGHT_COMMUNICATION,
-    confidence:   env.SCORE_WEIGHT_CONFIDENCE,
-    conceptDepth: env.SCORE_WEIGHT_CONCEPT_DEPTH,
+    communication:  env.SCORE_WEIGHT_COMMUNICATION,
+    confidence:     env.SCORE_WEIGHT_CONFIDENCE,
+    conceptDepth:   env.SCORE_WEIGHT_CONCEPT_DEPTH,
   };
   const overall =
-    evalData.scores.technical    * w.technical +
+    evalData.scores.technical      * w.technical +
     evalData.scores.problemSolving * w.problemSolving +
     evalData.scores.communication  * w.communication +
-    evalData.scores.confidence    * w.confidence +
-    evalData.scores.conceptDepth  * w.conceptDepth;
+    evalData.scores.confidence     * w.confidence +
+    evalData.scores.conceptDepth   * w.conceptDepth;
 
   const promptHash = crypto
     .createHash('sha256')
@@ -89,11 +92,11 @@ export const evaluateAnswer = async (
     .digest('hex')
     .slice(0, 12);
 
-  // ── FIX: include `answerText` in the create payload ──────────
+  // Persist evaluation (answerText was missing before — now included)
   await Evaluation.create({
     sessionId,
     questionId,
-    answerText,                            // ← was missing before
+    answerText,
     scores: evalData.scores,
     detectedKeywords: evalData.detectedKeywords ?? [],
     missingKeywords:  evalData.missingKeywords  ?? [],
@@ -104,7 +107,15 @@ export const evaluateAnswer = async (
     evaluationLatencyMs: latencyMs,
   });
 
-  // Update session state
+  // Emit evaluation result to frontend via Socket.IO
+  emitEvaluationComplete(sessionId, {
+    questionId,
+    scores: evalData.scores,
+    overall,
+    feedback: evalData.feedback,
+  });
+
+  // ── Decide next engine state ──────────────────────────────
   const session = await InterviewSession.findById(sessionId);
   if (session) {
     const question      = session.questions.find((q) => q.id === questionId);
@@ -129,12 +140,24 @@ export const evaluateAnswer = async (
       };
       session.questions.push(fuQuestion as any);
       if (question) (question as any).followUpCount = followUpCount + 1;
+      await session.save();
+      await safeRedisDel(`session:${sessionId}`);
     } else if (answersCount >= env.MAX_QUESTIONS_PER_SESSION) {
+      // ── FIX: mark session completed AND enqueue scorecard job ──
+      // Previously this only set status = 'completed' but never
+      // enqueued the scorecard worker, so /api/scores/:sessionId
+      // returned 404 forever after the interview finished.
       session.status = 'completed';
+      await session.save();
+      await safeRedisDel(`session:${sessionId}`);
+
+      // Enqueue scorecard generation (chains to recommendations)
+      await addGenerateScorecardJob({ sessionId, userId });
+      logger.info({ sessionId, userId, answersCount }, 'Session completed — scorecard job enqueued');
     } else {
       // Enqueue next question
-      const askedTopics       = session.questions.map((q) => (q as any).topic ?? '');
-      const askedQuestionIds  = session.questions.map((q) => q.id);
+      const askedTopics      = session.questions.map((q) => (q as any).topic ?? '');
+      const askedQuestionIds = session.questions.map((q) => q.id);
       await addGenerateQuestionJob({
         sessionId,
         userId,
@@ -145,10 +168,9 @@ export const evaluateAnswer = async (
         askedTopics,
         askedQuestionIds,
       });
+      await session.save();
+      await safeRedisDel(`session:${sessionId}`);
     }
-
-    await session.save();
-    await safeRedisDel(`session:${sessionId}`);
   }
 
   logger.info(

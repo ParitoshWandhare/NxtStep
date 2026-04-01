@@ -134,7 +134,7 @@ export default function DashboardPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 animate-slide-down">
         <div>
           <h1 className="font-display font-bold text-2xl sm:text-3xl text-[var(--color-text-primary)]">
-            {greeting}, {user?.name?.split(' ')[0] || 'there'} 👋
+            {greeting}, {user?.name?.split(' ')[0] || 'there'} !!
           </h1>
           <p className="text-sm text-[var(--color-text-muted)] mt-1">
             Ready to level up your interview skills?

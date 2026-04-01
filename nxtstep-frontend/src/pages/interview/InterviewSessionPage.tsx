@@ -1,12 +1,13 @@
 // ============================================================
-// NxtStep — Interview Session Page (Fixed v4)
+// NxtStep — Interview Session Page (Fixed v5)
 // Fixes:
-//  1. STUCK "Evaluating" state: isAnswering now resets when
-//     a new question arrives (via socket OR REST polling)
-//  2. STT network error: gracefully falls back to manual text
-//     input without breaking the question/answer flow
-//  3. delayedWaiting logic simplified — single source of truth
-//  4. Socket connect stabilised — no dependency on permGranted
+//  1. PRIMARY FIX: isAnswering now cleared when question:ready
+//     fires via socket (moved to useInterviewSocket.ts)
+//  2. REST polling hydration also clears isAnswering correctly
+//  3. submitted state in FullScreenInterview resets reliably
+//     by watching question?.id only (clean single source)
+//  4. showWaiting simplified — only depends on Redux state,
+//     not on local submitted flag
 // ============================================================
 
 import { useEffect, useRef, useCallback, useState } from 'react';
@@ -107,7 +108,6 @@ function useSpeechRecognition({
         onErrorRef.current?.(err);
         return;
       }
-      // no-speech / audio-capture are non-fatal — let onend restart
     };
 
     recogRef.current = recog;
@@ -346,25 +346,22 @@ function FullScreenInterview({
   const [isManualMode, setIsManualMode] = useState(false);
   const [sttUnavailable, setSttUnavailable] = useState(false);
   const [manualText, setManualText] = useState('');
+  // submitted tracks whether THIS question's answer was submitted
+  // it resets whenever question.id changes (new question arrived)
   const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
     if (videoRef.current && stream) videoRef.current.srcObject = stream;
   }, [stream]);
 
-  // Reset answer input whenever a new question arrives
+  // Reset all answer state when a NEW question arrives.
+  // question?.id is the single reliable signal — when it changes,
+  // the backend has sent a new question and we're ready for input.
   useEffect(() => {
     setTranscript('');
     setManualText('');
     setSubmitted(false);
   }, [question?.id]);
-
-  // ── KEY FIX: also reset submitted state when waiting ends (new Q arrived)
-  useEffect(() => {
-    if (!isWaiting && question) {
-      setSubmitted(false);
-    }
-  }, [isWaiting, question?.id]);
 
   const handleSttError = useCallback((err: string) => {
     if (err === 'network' || err === 'not-allowed' || err === 'service-not-allowed') {
@@ -449,7 +446,7 @@ function FullScreenInterview({
 
       {/* Centre: Question or Waiting */}
       <div className="relative z-10 flex-1 flex items-center justify-center px-8 py-4">
-        {isWaiting || !question ? (
+        {isWaiting ? (
           <div className="text-center">
             <div className="relative mx-auto mb-4 w-16 h-16">
               <div className="w-16 h-16 rounded-2xl bg-primary-500/20 border border-primary-500/30 flex items-center justify-center backdrop-blur-sm">
@@ -463,7 +460,7 @@ function FullScreenInterview({
               <div className="h-full bg-primary-400/70 rounded-full w-3/5 animate-pulse" />
             </div>
           </div>
-        ) : (
+        ) : question ? (
           <div className="max-w-3xl w-full">
             <div className="backdrop-blur-xl bg-black/40 border border-white/10 rounded-3xl p-8 shadow-2xl">
               <div className="flex items-center gap-2 mb-4">
@@ -484,10 +481,20 @@ function FullScreenInterview({
               <p className="text-white font-semibold text-xl leading-relaxed">{question.text}</p>
             </div>
           </div>
+        ) : (
+          // Fallback: no question yet, not explicitly waiting
+          <div className="text-center">
+            <div className="relative mx-auto mb-4 w-16 h-16">
+              <div className="w-16 h-16 rounded-2xl bg-primary-500/20 border border-primary-500/30 flex items-center justify-center backdrop-blur-sm">
+                <Loader2 size={28} className="text-primary-400 animate-spin" />
+              </div>
+            </div>
+            <p className="text-white/80 font-display font-semibold text-lg">Loading your question…</p>
+          </div>
         )}
       </div>
 
-      {/* Bottom: Answer input */}
+      {/* Bottom: Answer input — only shown when we have a question and NOT waiting */}
       <div className="relative z-10 px-6 pb-6">
         <div className="max-w-3xl mx-auto">
           {/* STT unavailable warning */}
@@ -495,12 +502,12 @@ function FullScreenInterview({
             <div className="flex items-center gap-2 px-4 py-2 mb-2 rounded-xl bg-yellow-500/20 border border-yellow-500/30">
               <AlertTriangle size={14} className="text-yellow-400 shrink-0" />
               <p className="text-yellow-200 text-xs">
-                Voice recognition unavailable in this browser/environment — type your answer below.
+                Voice recognition unavailable — type your answer below.
               </p>
             </div>
           )}
 
-          {/* ── KEY FIX: show "submitted" panel only while still waiting ── */}
+          {/* Show "submitted, waiting" panel while isWaiting is true after submit */}
           {submitted && isWaiting ? (
             <div className="backdrop-blur-xl bg-emerald-500/20 border border-emerald-500/30 rounded-2xl p-4 flex items-center gap-3">
               <CheckCircle2 size={20} className="text-emerald-400" />
@@ -509,106 +516,104 @@ function FullScreenInterview({
                 <p className="text-white/50 text-xs">AI is evaluating and preparing next question…</p>
               </div>
             </div>
-          ) : (
-            // Show input as soon as a new question is ready (even if submitted was true)
-            !isWaiting && question && (
-              <div className="backdrop-blur-xl bg-black/50 border border-white/10 rounded-2xl overflow-hidden">
-                {/* Header row */}
-                <div className="flex items-center justify-between px-4 pt-3 pb-1">
-                  <div className="flex items-center gap-2">
-                    {isListening && (
-                      <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-semibold animate-pulse">
-                        <Radio size={10} /> Recording
-                      </span>
-                    )}
-                    {!isListening && !isManualMode && (
-                      <span className="text-white/40 text-xs">
-                        {canUseVoice ? 'Press mic to speak' : 'Type your answer below'}
-                      </span>
-                    )}
-                    {isManualMode && !sttUnavailable && (
-                      <span className="text-white/40 text-xs">Typing mode</span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-white/30 text-xs">{activeText.length}/5000</span>
-                    {canUseVoice && (
-                      <button
-                        onClick={() => { setIsManualMode(m => !m); if (isListening) stopListening(); }}
-                        className="text-xs text-white/40 hover:text-white/70 transition-colors hover:underline underline-offset-2">
-                        {isManualMode ? '🎤 Use voice' : '⌨️ Type instead'}
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Text area / transcript */}
-                <div className="relative min-h-[80px] px-4 py-3">
-                  {isManualMode ? (
-                    <textarea
-                      value={manualText}
-                      onChange={e => setManualText(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSubmit) handleSubmit(); }}
-                      placeholder="Type your answer here… (Ctrl+Enter to submit)"
-                      className="w-full bg-transparent text-white placeholder:text-white/30 text-sm leading-relaxed resize-none focus:outline-none"
-                      rows={3}
-                      maxLength={5000}
-                      autoFocus
-                    />
-                  ) : (
-                    <div className="min-h-[60px]">
-                      {isListening && (
-                        <div className="flex items-center gap-0.5 mb-2 h-5">
-                          {Array.from({ length: 20 }).map((_, i) => (
-                            <span key={i} className="w-0.5 rounded-full bg-red-400/70 animate-bounce"
-                              style={{ height: `${8 + (i % 5) * 4}px`, animationDelay: `${i * 50}ms`, animationDuration: '0.6s' }} />
-                          ))}
-                        </div>
-                      )}
-                      {transcript ? (
-                        <p className="text-white text-sm leading-relaxed whitespace-pre-wrap">{transcript}</p>
-                      ) : (
-                        <p className="text-white/30 text-sm italic">
-                          {isListening ? 'Listening… speak your answer clearly' : 'Press the microphone to start speaking'}
-                        </p>
-                      )}
-                    </div>
+          ) : !isWaiting && question ? (
+            // Input panel — shown whenever we have a question and are not waiting
+            <div className="backdrop-blur-xl bg-black/50 border border-white/10 rounded-2xl overflow-hidden">
+              {/* Header row */}
+              <div className="flex items-center justify-between px-4 pt-3 pb-1">
+                <div className="flex items-center gap-2">
+                  {isListening && (
+                    <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-semibold animate-pulse">
+                      <Radio size={10} /> Recording
+                    </span>
+                  )}
+                  {!isListening && !isManualMode && (
+                    <span className="text-white/40 text-xs">
+                      {canUseVoice ? 'Press mic to speak' : 'Type your answer below'}
+                    </span>
+                  )}
+                  {isManualMode && !sttUnavailable && (
+                    <span className="text-white/40 text-xs">Typing mode</span>
                   )}
                 </div>
-
-                {/* Controls */}
-                <div className="flex items-center gap-3 px-4 pb-4">
-                  {!isManualMode && canUseVoice && (
-                    <button onClick={handleToggleMic} disabled={isSubmitting}
-                      className={cn(
-                        'flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all duration-200',
-                        isListening
-                          ? 'bg-red-500 text-white shadow-lg shadow-red-500/30'
-                          : 'bg-white/10 border border-white/20 text-white hover:bg-white/20',
-                        isSubmitting && 'opacity-50 cursor-not-allowed'
-                      )}>
-                      {isListening
-                        ? <><div className="w-2 h-2 rounded-full bg-white animate-pulse" />Stop</>
-                        : <><Mic size={16} />Record</>}
+                <div className="flex items-center gap-3">
+                  <span className="text-white/30 text-xs">{activeText.length}/5000</span>
+                  {canUseVoice && (
+                    <button
+                      onClick={() => { setIsManualMode(m => !m); if (isListening) stopListening(); }}
+                      className="text-xs text-white/40 hover:text-white/70 transition-colors hover:underline underline-offset-2">
+                      {isManualMode ? '🎤 Use voice' : '⌨️ Type instead'}
                     </button>
                   )}
-
-                  {activeText && !isListening && (
-                    <button onClick={() => { setTranscript(''); setManualText(''); clearTranscript(); }}
-                      className="px-3 py-2.5 rounded-xl text-sm text-white/40 hover:text-white/70 hover:bg-white/10 transition-all">
-                      Clear
-                    </button>
-                  )}
-
-                  <Button onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}
-                    size="md" rightIcon={<Send size={15} />}
-                    className="ml-auto bg-primary-500 hover:bg-primary-600 shadow-glow">
-                    {isSubmitting ? 'Submitting…' : 'Submit Answer'}
-                  </Button>
                 </div>
               </div>
-            )
-          )}
+
+              {/* Text area / transcript */}
+              <div className="relative min-h-[80px] px-4 py-3">
+                {isManualMode ? (
+                  <textarea
+                    value={manualText}
+                    onChange={e => setManualText(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSubmit) handleSubmit(); }}
+                    placeholder="Type your answer here… (Ctrl+Enter to submit)"
+                    className="w-full bg-transparent text-white placeholder:text-white/30 text-sm leading-relaxed resize-none focus:outline-none"
+                    rows={3}
+                    maxLength={5000}
+                    autoFocus
+                  />
+                ) : (
+                  <div className="min-h-[60px]">
+                    {isListening && (
+                      <div className="flex items-center gap-0.5 mb-2 h-5">
+                        {Array.from({ length: 20 }).map((_, i) => (
+                          <span key={i} className="w-0.5 rounded-full bg-red-400/70 animate-bounce"
+                            style={{ height: `${8 + (i % 5) * 4}px`, animationDelay: `${i * 50}ms`, animationDuration: '0.6s' }} />
+                        ))}
+                      </div>
+                    )}
+                    {transcript ? (
+                      <p className="text-white text-sm leading-relaxed whitespace-pre-wrap">{transcript}</p>
+                    ) : (
+                      <p className="text-white/30 text-sm italic">
+                        {isListening ? 'Listening… speak your answer clearly' : 'Press the microphone to start speaking'}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Controls */}
+              <div className="flex items-center gap-3 px-4 pb-4">
+                {!isManualMode && canUseVoice && (
+                  <button onClick={handleToggleMic} disabled={isSubmitting}
+                    className={cn(
+                      'flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all duration-200',
+                      isListening
+                        ? 'bg-red-500 text-white shadow-lg shadow-red-500/30'
+                        : 'bg-white/10 border border-white/20 text-white hover:bg-white/20',
+                      isSubmitting && 'opacity-50 cursor-not-allowed'
+                    )}>
+                    {isListening
+                      ? <><div className="w-2 h-2 rounded-full bg-white animate-pulse" />Stop</>
+                      : <><Mic size={16} />Record</>}
+                  </button>
+                )}
+
+                {activeText && !isListening && (
+                  <button onClick={() => { setTranscript(''); setManualText(''); clearTranscript(); }}
+                    className="px-3 py-2.5 rounded-xl text-sm text-white/40 hover:text-white/70 hover:bg-white/10 transition-all">
+                    Clear
+                  </button>
+                )}
+
+                <Button onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}
+                  size="md" rightIcon={<Send size={15} />}
+                  className="ml-auto bg-primary-500 hover:bg-primary-600 shadow-glow">
+                  {isSubmitting ? 'Submitting…' : 'Submit Answer'}
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -627,7 +632,6 @@ export default function InterviewSessionPage() {
   const [liveStream, setLiveStream] = useState<MediaStream | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
-  // Simple waiting message — not tied to complex state machine
   const [waitingMessage, setWaitingMessage] = useState('Generating your first question…');
 
   const { isSpeaking, isMuted, speak, cancel: cancelTTS, toggleMute } = useTextToSpeech();
@@ -643,20 +647,21 @@ export default function InterviewSessionPage() {
   const submitAnswerMutation = useSubmitAnswer(sessionId || '');
   const logEvent = useLogProctoringEvent(sessionId || '');
 
-  // ── REST polling — fires every 2s until a question arrives ─
+  // ── REST polling — fires every 2s until a question arrives ──
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stopPolling = useCallback(() => {
     if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
   }, []);
 
+  // Poll while we don't have a current question
   useEffect(() => {
-    if (currentQuestion) { stopPolling(); return; }
+    if (currentQuestion && !isWaiting) { stopPolling(); return; }
     if (pollingRef.current) return;
     pollingRef.current = setInterval(() => { refetchSession(); }, 2000);
     return stopPolling;
-  }, [currentQuestion, refetchSession, stopPolling]);
+  }, [currentQuestion, isWaiting, refetchSession, stopPolling]);
 
-  // ── Hydrate question from REST response ───────────────────
+  // ── Hydrate question from REST response ────────────────────
   const prevQLen = useRef(0);
   useEffect(() => {
     if (!session) return;
@@ -677,31 +682,34 @@ export default function InterviewSessionPage() {
       if (nextQ && (!currentQuestion || currentQuestion.id !== nextQ.id)) {
         console.log('[Interview] Hydrating question from REST:', nextQ.id);
         dispatch(setCurrentQuestion({
-          id: nextQ.id, text: nextQ.text,
-          type: nextQ.type || 'concept', topic: nextQ.topic || 'general',
+          id: nextQ.id,
+          text: nextQ.text,
+          type: nextQ.type || 'concept',
+          topic: nextQ.topic || 'general',
           difficulty: nextQ.difficulty || 'mid',
           expectedKeywords: nextQ.expectedKeywords || [],
           followUpCount: nextQ.followUpCount || 0,
           parentQuestionId: nextQ.parentQuestionId,
         }));
         dispatch(setWaitingForQuestion(false));
-        // ── KEY FIX: reset isAnswering when a new question arrives
+        // KEY FIX: also clear isAnswering so UI exits the "Evaluating" state
         dispatch(setIsAnswering(false));
         setWaitingMessage('Generating next question…');
+        stopPolling();
       }
     }
-  }, [session, currentQuestion, dispatch, navigate, sessionId]);
+  }, [session, currentQuestion, dispatch, navigate, sessionId, stopPolling]);
 
-  // ── Update waiting message contextually ──────────────────
+  // ── Update waiting message contextually ───────────────────
   useEffect(() => {
     if (isAnswering || submitAnswerMutation.isPending) {
       setWaitingMessage('Evaluating your answer…');
-    } else if (!currentQuestion) {
+    } else if (isWaiting && !currentQuestion) {
       setWaitingMessage('Generating next question…');
     }
-  }, [isAnswering, submitAnswerMutation.isPending, currentQuestion]);
+  }, [isAnswering, submitAnswerMutation.isPending, isWaiting, currentQuestion]);
 
-  // ── Auto-speak new question ───────────────────────────────
+  // ── Auto-speak new question ────────────────────────────────
   const prevQuestionId = useRef<string | null>(null);
   useEffect(() => {
     if (currentQuestion && currentQuestion.id !== prevQuestionId.current) {
@@ -710,7 +718,7 @@ export default function InterviewSessionPage() {
     }
   }, [currentQuestion?.id, speak]);
 
-  // ── Proctoring: tab switches ──────────────────────────────
+  // ── Proctoring: tab switches ───────────────────────────────
   useEffect(() => {
     if (!permGranted) return;
     const onVisibility = () => { if (document.hidden) logEvent.mutate({ eventType: 'tab_switch' }); };
@@ -718,7 +726,7 @@ export default function InterviewSessionPage() {
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, [permGranted]);
 
-  // ── Socket handlers ───────────────────────────────────────
+  // ── Socket handlers ────────────────────────────────────────
   const handleScorecardReady = useCallback((_: SocketScorecardReadyPayload) => {
     stopPolling();
     navigate(`/interview/${sessionId}/results`);
@@ -729,7 +737,7 @@ export default function InterviewSessionPage() {
     navigate(`/interview/${sessionId}/results`);
   }, [navigate, sessionId, stopPolling]);
 
-  // Connect socket immediately (not gated on permGranted)
+  // Connect socket immediately
   useInterviewSocket({
     sessionId: sessionId || null,
     token,
@@ -737,7 +745,7 @@ export default function InterviewSessionPage() {
     onTerminated: handleTerminated,
   });
 
-  // ── Cleanup ───────────────────────────────────────────────
+  // ── Cleanup ────────────────────────────────────────────────
   useEffect(() => {
     return () => {
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -749,24 +757,27 @@ export default function InterviewSessionPage() {
 
   const answerCount = session?.answers?.length || 0;
 
-  // ── KEY FIX: isWaiting = true only if we have no question yet
-  //    OR we are actively waiting after submitting (isAnswering still true
-  //    and no new question dispatched yet)
-  const showWaiting = isWaiting || !currentQuestion;
+  // showWaiting is true when:
+  // - We are explicitly waiting for a question (isWaiting=true)
+  // - OR we have no question yet
+  // - OR we are still processing an answer (isAnswering=true)
+  //   BUT only until the socket/REST delivers the next question
+  //   (isAnswering gets cleared in both those paths now)
+  const showWaiting = isWaiting || !currentQuestion || isAnswering;
 
   const handleSubmitAnswer = async (text: string) => {
     if (!currentQuestion || !text.trim()) return;
     cancelTTS();
     dispatch(setIsAnswering(true));
     dispatch(setWaitingForQuestion(true));
-    // Clear current question so the waiting spinner shows immediately
-    // (the next question will arrive via socket or REST polling)
     try {
-      await submitAnswerMutation.mutateAsync({ questionId: currentQuestion.id, answerText: text.trim() });
-      // After REST ack, keep waiting — socket/polling will dispatch next question
-      // which resets isAnswering and isWaitingForQuestion
+      await submitAnswerMutation.mutateAsync({
+        questionId: currentQuestion.id,
+        answerText: text.trim(),
+      });
     } catch (err) {
       console.error('[Interview] Submit failed:', err);
+      // On error, revert so user can retry
       dispatch(setIsAnswering(false));
       dispatch(setWaitingForQuestion(false));
     }
