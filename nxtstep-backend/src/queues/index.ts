@@ -1,19 +1,16 @@
 // ============================================================
 // NxtStep — BullMQ Queue Definitions & Job Types
+// FIX: All queues now share a single IORedis connection via
+// sharedBullConnection to prevent connection pool exhaustion.
 // ============================================================
 
 import { Queue, QueueOptions } from 'bullmq';
+import { sharedBullConnection } from '../config/bullmq-connection';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 
-const connection = {
-  url: env.REDIS_URL,
-  lazyConnect: true,
-  maxRetriesPerRequest: null,
-};
-
 const defaultQueueOpts: QueueOptions = {
-  connection,
+  connection: sharedBullConnection,
   defaultJobOptions: {
     attempts: 3,
     backoff: { type: 'exponential', delay: 2000 },
@@ -106,6 +103,9 @@ export const addIngestNewsJob = (data: IngestNewsJobData = {}) =>
   });
 
 // ── Graceful close ───────────────────────────────────────────
+// Note: We close queues but NOT the shared connection here —
+// closeBullConnection() in bullmq-connection.ts handles that
+// and must be called AFTER all queues and workers are closed.
 export const closeAllQueues = async () => {
   await Promise.allSettled([
     evaluateAnswerQueue.close(),

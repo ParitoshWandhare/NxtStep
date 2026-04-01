@@ -1,5 +1,8 @@
 // ============================================================
 // NxtStep — Server Entry Point
+// FIX: closeBullConnection() is now called during graceful
+// shutdown AFTER all queues and workers are closed, ensuring
+// the shared IORedis connection is properly released.
 // ============================================================
 
 import 'dotenv/config';
@@ -7,6 +10,7 @@ import http from 'http';
 import { app } from './app';
 import { connectDB } from './config/database';
 import { connectRedis, disconnectRedis } from './config/redis';
+import { closeBullConnection } from './config/bullmq-connection';
 import { initSocket } from './sockets/index';
 import { closeAllQueues, addIngestNewsJob } from './queues';
 import { closeAllWorkers } from './workers/index';
@@ -20,12 +24,6 @@ const start = async () => {
   await connectDB();
 
   // 2. Connect to Redis (non-fatal — safe wrappers handle degraded state)
-  // try {
-  //   await redisClient.connect();
-  //   logger.info('Redis connected');
-  // } catch (err) {
-  //   logger.warn({ err }, 'Redis unavailable — running without cache');
-  // }
   await connectRedis();
 
   // 3. Create HTTP server
@@ -62,12 +60,17 @@ const shutdown = async (signal: string) => {
   });
 
   try {
+    // Step 1: Close workers (stop polling) and queues (stop accepting jobs)
     await Promise.allSettled([
       closeAllWorkers(),
       closeAllQueues(),
-      // redisClient.quit(),
-      disconnectRedis(),
     ]);
+
+    // Step 2: Now safe to close the shared BullMQ Redis connection
+    await closeBullConnection();
+
+    // Step 3: Close the @redis/client caching connection
+    await disconnectRedis();
   } catch (err) {
     logger.warn({ err }, 'Error during graceful shutdown');
   }

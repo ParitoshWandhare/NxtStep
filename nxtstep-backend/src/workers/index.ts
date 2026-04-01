@@ -1,8 +1,12 @@
 // ============================================================
 // NxtStep — BullMQ Workers (all in one file for clarity)
+// FIX: All workers now share a single IORedis connection via
+// sharedBullConnection instead of each opening their own, and
+// concurrency is lowered to reduce total connection count.
 // ============================================================
 
 import { Worker, Job } from 'bullmq';
+import { sharedBullConnection } from '../config/bullmq-connection';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import {
@@ -14,11 +18,9 @@ import {
   IngestNewsJobData,
 } from '../queues';
 
-const connection = {
-  url: env.REDIS_URL,
-  lazyConnect: true,
-  maxRetriesPerRequest: null,
-};
+// Shared worker options — single connection, conservative concurrency
+// to avoid Redis client limit exhaustion on hobby/free plans.
+const workerConcurrency = Math.min(env.WORKER_CONCURRENCY ?? 2, 2);
 
 // ── Evaluate Answer Worker ───────────────────────────────────
 export const evaluateWorker = new Worker<EvaluateAnswerJobData>(
@@ -39,7 +41,7 @@ export const evaluateWorker = new Worker<EvaluateAnswerJobData>(
       job.data.role
     );
   },
-  {   connection, concurrency: env.WORKER_CONCURRENCY ?? 4 }
+  { connection: sharedBullConnection, concurrency: workerConcurrency }
 );
 
 // ── Generate Question Worker ─────────────────────────────────
@@ -95,7 +97,7 @@ export const generateQuestionWorker = new Worker<GenerateQuestionJobData>(
     await safeRedisDel(`session:${job.data.sessionId}`);
     logger.info({ sessionId: job.data.sessionId, questionId: newQuestion.id }, 'Question generated');
   },
-  { connection, concurrency: env.WORKER_CONCURRENCY ?? 4 }
+  { connection: sharedBullConnection, concurrency: workerConcurrency }
 );
 
 // ── Scorecard Worker ─────────────────────────────────────────
@@ -111,7 +113,7 @@ export const scorecardWorker = new Worker<GenerateScorecardJobData>(
     // Chain: after scorecard → recommendations
     await addRecommendRolesJob({ sessionId: job.data.sessionId, userId: job.data.userId });
   },
-  { connection, concurrency: 2 }
+  { connection: sharedBullConnection, concurrency: 1 }
 );
 
 // ── Recommend Roles Worker ───────────────────────────────────
@@ -122,7 +124,7 @@ export const recommendWorker = new Worker<RecommendRolesJobData>(
     logger.info({ jobId: job.id, sessionId: job.data.sessionId }, 'Generating recommendations');
     await generateRecommendations(job.data.sessionId, job.data.userId);
   },
-  { connection, concurrency: 2 }
+  { connection: sharedBullConnection, concurrency: 1 }
 );
 
 // ── News Ingestion Worker ────────────────────────────────────
@@ -134,7 +136,7 @@ export const newsWorker = new Worker<IngestNewsJobData>(
     const count = await runNewsIngestion();
     logger.info({ count }, 'News ingestion worker done');
   },
-  { connection, concurrency: 1 }
+  { connection: sharedBullConnection, concurrency: 1 }
 );
 
 // ── Shared error handlers ────────────────────────────────────
@@ -150,6 +152,9 @@ for (const worker of workers) {
 }
 
 // ── Graceful shutdown ────────────────────────────────────────
+// Closes all worker polling loops. The shared Redis connection
+// itself is closed separately via closeBullConnection() in server.ts
+// shutdown sequence, AFTER this function resolves.
 export const closeAllWorkers = async () => {
   await Promise.allSettled(workers.map((w) => w.close()));
   logger.info('All workers closed');
